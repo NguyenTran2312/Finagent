@@ -1,0 +1,18 @@
+dataset:
+  repo_id: AIGuruTinix/ViFinQA
+  cache_dir: data/caches/huggingface
+embedding:
+  model_name: BAAI/bgem3
+  batch_size: 32
+  max_seq_length: 512
+chroma:
+  cache_root: data/chroma
+  index_version: v0.1
+database:
+  host: localhost
+  port: 5432
+  name: finance_corpus
+  user: postgres
+  password_env: POSTGRES_PASSWORD
+  connect_timeout: 10
+output_dir: outputs

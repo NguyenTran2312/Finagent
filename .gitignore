@@ -1,0 +1,22 @@
+# Biến môi trường
+.env
+.env.*
+!.env.example
+
+# Môi trường Python và cache
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# File tạm
+.tmp*/
+tests/tmp*/
+
+# Dữ liệu và kết quả sinh ra
+data/.cache/
+data/caches/
+data/databases/
+data/financial_statements/
+outputs/
