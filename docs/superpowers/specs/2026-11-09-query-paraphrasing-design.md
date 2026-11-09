@@ -1,10 +1,10 @@
 # Finagent Query Paraphrasing — thiết kế tích hợp
 
-Ngày: 2026-11-09. Trạng thái: chờ duyệt tài liệu thiết kế.
+Ngày: 2026-11-09. Trạng thái: người dùng đã duyệt ngày 2026-11-09.
 
 Người dùng đã chọn phương án A: module điều phối độc lập trước Hybrid Retrieval.
-Các chính sách chi tiết ghi dưới đây là đề xuất kỹ thuật của người triển khai,
-chưa được coi là người dùng đã duyệt chỉ qua việc chọn A.
+Các chính sách chi tiết ghi dưới đây được đề xuất bởi người triển khai và đã được
+người dùng duyệt cùng toàn bộ tài liệu sau bước chọn phương án A.
 
 ## 1. Mục tiêu và giới hạn
 
