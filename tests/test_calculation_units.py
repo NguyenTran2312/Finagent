@@ -67,6 +67,37 @@ class UnitsTests(unittest.TestCase):
             M("5") < R("3")
         self.assertTrue(M("5") > M("3"))
 
+    def test_exact_zero_is_additive_identity_for_any_dimension(self):
+        days = Quantity(D(30), Dm.DAYS)
+        self.assertEqual(0 + M("5"), M("5"))
+        self.assertEqual(M("5") + 0, M("5"))
+        self.assertEqual(D(0) + days, days)
+        self.assertEqual(M("5") - D("0.00"), M("5"))
+        self.assertEqual(0 - M("5"), M("-5"))
+        self.assertEqual(sum([M("1"), M("2"), M("3")]), M("6"))
+        self.assertEqual(sum([R("0.1"), R("0.2")]), R("0.3"))
+        with self.assertRaises(UnitError):
+            M("5") + 1
+        with self.assertRaises(UnitError):
+            1 + M("5")
+        with self.assertRaises(TypeError):
+            M("5") + False
+        with self.assertRaises(TypeError):
+            M("5") + 0.0
+
+    def test_exact_zero_is_comparable_for_any_dimension(self):
+        self.assertTrue(M("5") > 0)
+        self.assertTrue(M("-5") < D(0))
+        self.assertTrue(M("0") >= 0)
+        self.assertTrue(0 < M("5"))
+        self.assertFalse(Quantity(D(-1), Dm.DAYS) >= 0)
+        with self.assertRaises(UnitError):
+            M("5") > 1
+        with self.assertRaises(TypeError):
+            M("5") > False
+        with self.assertRaises(TypeError):
+            M("5") > 0.0
+
     def test_display_money_scales(self):
         self.assertEqual(to_display(M("1234567000000"), display_unit("ty")), D("1234.567"))
         self.assertEqual(to_display(M("2500000000000"), display_unit("nghin_ty")), D("2.5"))

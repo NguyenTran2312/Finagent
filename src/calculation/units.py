@@ -48,6 +48,15 @@ def _coerce(other: object) -> Quantity | None:
     return None
 
 
+def _is_exact_zero(other: object) -> bool:
+    """True for int 0 or a zero Decimal (never bool): the dimensionless additive identity."""
+    if isinstance(other, bool):
+        return False
+    if isinstance(other, Decimal):
+        return other.is_zero()
+    return isinstance(other, int) and other == 0
+
+
 @dataclass(frozen=True, slots=True)
 class Quantity:
     value: Decimal
@@ -63,6 +72,9 @@ class Quantity:
 
     # --- additive ---
     def _additive(self, other: object, sign: int, reverse: bool) -> Quantity:
+        if _is_exact_zero(other):
+            # Exact zero is the identity for any dimension, so builtin sum() works on money.
+            return -self if reverse and sign < 0 else self
         o = _coerce(other)
         if o is None:
             return NotImplemented
@@ -130,7 +142,7 @@ class Quantity:
             o = _coerce(other)
             if o is None:
                 return NotImplemented
-            if self.dimension not in _NUMBER_COMPARABLE:
+            if self.dimension not in _NUMBER_COMPARABLE and not _is_exact_zero(other):
                 raise UnitError(f"cannot compare {self.dimension} with a bare number")
             o = Quantity(o.value, self.dimension)
         if o.dimension is not self.dimension:
