@@ -66,6 +66,13 @@ class MetricTreeTests(unittest.TestCase):
             frozenset({LeafRequest("a", 2024, "flow")}),
             frozenset({LeafRequest("a", 2024, "flow"), LeafRequest("b", 2024, "flow")})])
 
+    def test_nested_alternatives_are_all_requested(self):
+        t = tree([derived("m", ["a", "a - b"], dim="money"),
+                  derived("r", ["m / c"])])
+        self.assertEqual(t.required_leaves("r", "corporate", 2024), [frozenset({
+            LeafRequest("a", 2024, "flow"), LeafRequest("b", 2024, "flow"),
+            LeafRequest("c", 2024, "closing")})])
+
     def test_tree_errors(self):
         dup_alias = base_leaves()
         dup_alias["corporate"] = [leaf("a", aliases=["x"]), leaf("b", aliases=["X"])]

@@ -290,7 +290,7 @@ class MetricTree:
                                 or (target is not None and template in target.templates)):
                             raise TreeError(f("derived", n.id), n.id,
                                             f"unknown reference {ref.node_id!r} for template {template}")
-        # cycles
+        # cycles (offsets are ignored on purpose: r = r[t-1] + a is still rejected)
         state: dict[str, int] = {}
 
         def visit(node_id: str, path: list[str]) -> None:
@@ -366,7 +366,11 @@ class MetricTree:
         raise KeyError(f"metric {id!r} does not apply to template {template}")
 
     def required_leaves(self, node_id: str, template: Template, year: int) -> list[frozenset[LeafRequest]]:
-        """One leaf set per formula alternative; nested derived nodes use their first formula."""
+        """One leaf set per formula alternative of the requested node, in order.
+
+        Nested derived nodes contribute the union of the leaves of ALL their alternatives
+        (over-fetch, never under-fetch), because evaluation may fall back at any level.
+        """
         if not self.applies(node_id, template):
             raise KeyError(f"metric {node_id!r} does not apply to template {template}")
 
@@ -380,7 +384,7 @@ class MetricTree:
             leaf = self._leaves.get((template, nid))
             if leaf is not None:
                 return frozenset({LeafRequest(nid, y, leaf.period_kind)})
-            return expand(self._derived[nid].formulas[0], y)
+            return frozenset().union(*(expand(f, y) for f in self._derived[nid].formulas))
 
         leaf = self._leaves.get((template, node_id))
         if leaf is not None:
