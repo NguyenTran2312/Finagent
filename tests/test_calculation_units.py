@@ -98,6 +98,39 @@ class UnitsTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             M("5") > 0.0
 
+    def test_equality_with_bare_number_follows_comparison_rules(self):
+        # R10: == / != against a bare number never silently returns False.
+        self.assertTrue(M("0") == 0)
+        self.assertTrue(M("0.00") == D(0))
+        self.assertTrue(0 == M("0"))
+        self.assertTrue(D(0) == Quantity(D(0), Dm.DAYS))
+        self.assertFalse(M("5") == 0)
+        self.assertTrue(M("5") != 0)
+        self.assertTrue(R("0.5") == D("0.5"))
+        self.assertTrue(D("0.5") == R("0.5"))
+        self.assertTrue(R("0.5") != 1)
+        self.assertTrue(Quantity(D(3), Dm.COUNT) == 3)
+        with self.assertRaises(UnitError):
+            M("5") == 5
+        with self.assertRaises(UnitError):
+            M("5") != D("5")
+        with self.assertRaises(UnitError):
+            5 == M("5")
+        with self.assertRaises(TypeError):
+            M("0") == False
+        with self.assertRaises(TypeError):
+            R("1") == 1.0
+
+    def test_quantity_equality_and_hash_unchanged(self):
+        self.assertTrue(M("5") == M("5.0"))
+        self.assertFalse(M("5") == R("5"))  # different dimension: unequal, no error
+        self.assertTrue(M("5") != R("5"))
+        self.assertFalse(M("5") == "5")
+        self.assertFalse(M("5") == None)  # noqa: E711
+        self.assertEqual(hash(M("5")), hash(M("5.0")))
+        self.assertEqual(len({M("5"), M("5.0"), R("5")}), 2)
+        self.assertEqual({M("1"): "a"}[M("1")], "a")
+
     def test_display_money_scales(self):
         self.assertEqual(to_display(M("1234567000000"), display_unit("ty")), D("1234.567"))
         self.assertEqual(to_display(M("2500000000000"), display_unit("nghin_ty")), D("2.5"))

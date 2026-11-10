@@ -149,6 +149,18 @@ class Quantity:
             raise UnitError(f"cannot compare {self.dimension} with {o.dimension}")
         return o
 
+    def __eq__(self, other):
+        # Quantity vs Quantity keeps dataclass equality (same value and dimension). A bare
+        # number follows the ordering rules (R10) instead of silently comparing unequal.
+        if other.__class__ is self.__class__:
+            return (self.value, self.dimension) == (other.value, other.dimension)
+        o = self._comparable(other)
+        return o if o is NotImplemented else self.value == o.value
+
+    # Defining __eq__ resets __hash__; keep the frozen-dataclass field hash explicitly.
+    def __hash__(self) -> int:
+        return hash((self.value, self.dimension))
+
     def __lt__(self, other):
         o = self._comparable(other)
         return o if o is NotImplemented else self.value < o.value
