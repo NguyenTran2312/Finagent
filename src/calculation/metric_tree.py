@@ -392,6 +392,12 @@ class MetricTree:
         return [expand(f, year) for f in self._derived[node_id].formulas]
 
     def find_by_alias(self, text: str, template: Template) -> set[str]:
+        """Ids of nodes whose folded aliases occur as whole words in QUESTION text.
+
+        Matching is substring-based (longest alias first), so it is for question text only.
+        Statement row labels must be matched by code or by exact equality of folded labels
+        (`fold_text`): e.g. "Dự phòng giảm giá hàng tồn kho" contains the `inventories` alias.
+        """
         by_alias, pattern = self._alias_index[template]
         if pattern is None:
             return set()

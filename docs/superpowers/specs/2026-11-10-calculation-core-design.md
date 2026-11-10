@@ -314,3 +314,51 @@ insurance templates; any change to retrieval, paraphrasing, PostgreSQL or Chroma
 - `metric_catalog.py` and the tree share ids but are separate until a later change generates
   the catalog from the tree.
 - End-to-end accuracy cannot be measured until sub-project 3 builds a labelled dev set.
+
+## 16. Known limits and contracts for sub-projects 2–4
+
+Implemented behaviour at the end of sub-project 1; later sub-projects must respect or fix it.
+
+**Alias matching (sub-project 2).**
+- `MetricTree.find_by_alias` is for QUESTION text only: it matches aliases as whole-word
+  substrings, longest first. Statement row labels must be matched by statement code or by
+  exact equality of folded labels (`fold_text`). Substring matching misroutes real labels:
+  "Dự phòng giảm giá hàng tồn kho" → `inventories`, "Tài sản ngắn hạn khác" →
+  `current_assets`, "Nợ phải trả ngắn hạn khác" → `current_liabilities`, bank "Chi phí hoạt
+  động dịch vụ" → `operating_expenses`.
+- Bank leaves inside a section (`parent`) are located by position under the section header
+  (plan decision D2), not by their own aliases.
+- Known question-alias collisions, pinned in `tests/test_calculation_metric_data.py`: Q157
+  "tổng nguồn vốn đầu tư xây dựng cơ bản" → `total_assets`; Q118 "dự phòng chung …" →
+  `customer_loans_gross`.
+
+**Generated-code constraints (sub-project 3 prompts).**
+- No attribute access at all (`d.items()`, `xs.append(...)`); iterate with `for k in d` and
+  build lists with comprehensions.
+- Numeric literals are exact `Decimal`s, but `int / int` from builtins/helpers (e.g.
+  `count_if(...) / len(xs)`) yields a float and fails closed; multiply by a literal first
+  (e.g. `count_if(...) * 100 / len(xs)`).
+- Thresholds go through `percent(n)` / `money(n, scale)`; for "1 nghìn tỷ" write
+  `money(1, "nghin_ty")`, not `money(1000, "ty")` (1000 is not a question literal).
+- Strings are allowed as plain values (ticker lists); f-strings are forbidden. The bare name
+  `_` is allowed; every other `_`-prefixed name is rejected.
+
+**Gate limits (sub-project 3).**
+- Provenance residual bypasses: arithmetic on allowed constants (`1 - 1/4`), `len("...")`,
+  and year-range integers used as amounts are not flagged.
+- The formula gate checks that `metric()` / `fact()` steps exist, not data flow: a program
+  can call `metric()` and return a hand-rolled value.
+- `requested_unit` is None for ~49 of ~940 quantity questions, so the unit check is skipped.
+- `compare_answers` requires identical units (no ty vs nghìn tỷ conversion).
+- A restated fact used only by a cross-check alternative still yields a cross-check error.
+- A duration phrasing "bao nhiêu năm" (e.g. payback period) would classify as `count`.
+- An English-format "1.5" in a question is not a question literal.
+
+**Facts (sub-project 2).** D1 conflict resolution (R7) is pairwise in input order and is
+order-dependent for 3+ facts of one key; it must compare each new fact against all prior
+facts before sub-project 2 merges facts from several sources.
+
+**Sandbox and display (sub-project 4).**
+- No memory cap and no OS-level isolation on Windows; serving should run the child in a Job
+  Object with a memory limit. The POSIX `RLIMIT_AS` path is untested.
+- `round_display` can return `-0.00`; the display layer must normalise it.
