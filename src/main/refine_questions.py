@@ -3,6 +3,7 @@
 import re
 
 from src.preprocess.cleaner import fold_text
+from src.retrieval.filters import normalize_metadata_filters
 
 
 def refine_question(question: str, known_tickers: set[str], *,
@@ -70,17 +71,25 @@ def filter_document_indices(documents: list, filters: dict) -> list[int]:
 
 
 def retrieve_refined(retriever, question: str, k: int | None = None, *,
-                     filter_question: str | None = None) -> dict:
+                     filter_question: str | None = None,
+                     metadata_filters=None) -> dict:
     """Filter metadata before scoring; reuse the retriever's global IDF.
 
     Missing scope defaults to consolidated; rewritten searches keep the original filters.
+    metadata_filters (dict or pydantic model with tickers/years/scopes) replaces text
+    extraction and cannot be combined with filter_question.
     """
     import numpy as np
 
     if not isinstance(question, str) or not question.strip():
         raise ValueError("question must be a non-empty string")
-    filters = refine_question(question if filter_question is None else filter_question,
-                              {doc.metadata["ticker"] for doc in retriever.docs})
+    if metadata_filters is not None:
+        if filter_question is not None:
+            raise ValueError("filter_question and metadata_filters are mutually exclusive")
+        filters = normalize_metadata_filters(metadata_filters)
+    else:
+        filters = refine_question(question if filter_question is None else filter_question,
+                                  {doc.metadata["ticker"] for doc in retriever.docs})
     k = retriever.k if k is None else k
     if type(k) is not int or k < 1:
         raise ValueError("k must be a positive integer")
