@@ -1,8 +1,9 @@
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 
 CONFIG_PATH = Path(__file__).resolve().with_name("config.yml")
@@ -49,3 +50,35 @@ def postgres_connection_params() -> dict[str, Any]:
     if password:
         params["password"] = password
     return params
+
+
+class ParaphraseSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_subqueries: StrictInt = Field(default=8, ge=1)
+    max_history_turns: StrictInt = Field(default=5, ge=0)
+    max_input_chars: StrictInt = Field(default=8000, ge=1)
+    default_report_scope: Literal["consolidated", "separate"] = "consolidated"
+    notes_fallback: StrictBool = True
+
+
+def load_paraphrase_settings(**overrides: Any) -> ParaphraseSettings:
+    """Resolve paraphrase settings at call time: defaults < environment < overrides."""
+    values: dict[str, Any] = {}
+    for field in ("max_subqueries", "max_history_turns", "max_input_chars"):
+        name = f"FINAGENT_PARAPHRASE_{field.upper()}"
+        if name in os.environ:
+            try:
+                values[field] = int(os.environ[name].strip())
+            except ValueError as error:
+                raise ValueError(f"{name} must be an integer: {os.environ[name]!r}") from error
+    if "FINAGENT_PARAPHRASE_DEFAULT_REPORT_SCOPE" in os.environ:
+        values["default_report_scope"] = os.environ["FINAGENT_PARAPHRASE_DEFAULT_REPORT_SCOPE"].strip()
+    name = "FINAGENT_PARAPHRASE_NOTES_FALLBACK"
+    if name in os.environ:
+        lowered = os.environ[name].strip().lower()
+        if lowered not in ("true", "false", "1", "0"):
+            raise ValueError(f"{name} must be true or false: {os.environ[name]!r}")
+        values["notes_fallback"] = lowered in ("true", "1")
+    values.update(overrides)
+    return ParaphraseSettings(**values)

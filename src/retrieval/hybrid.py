@@ -56,6 +56,8 @@ def build_hybrid_retriever(bm25, dense_store, *, k: int = 5,
     Rewritten searches can use invoke({"question": query, "filter_question": original}).
     Both branches filter ticker/year/scope before ranking, using the existing
     refinement rules (default scope: consolidated; years match report_year).
+    invoke({"question": query, "metadata_filters": {"tickers": [...], "years": [...],
+    "scopes": [...]}}) applies explicit filters instead (not with filter_question).
     """
     from langchain_core.runnables import RunnableLambda
 
@@ -68,9 +70,11 @@ def build_hybrid_retriever(bm25, dense_store, *, k: int = 5,
             raise ValueError("Expected a query string or retrieval input mapping")
         query = inputs if isinstance(inputs, str) else inputs.get("question")
         original = None if isinstance(inputs, str) else inputs.get("filter_question")
+        explicit = None if isinstance(inputs, str) else inputs.get("metadata_filters")
         if not isinstance(query, str) or not query.strip():
             raise ValueError("question must be a non-empty string")
-        lexical = retrieve_refined(bm25, query, k=candidate_k, filter_question=original)
+        lexical = retrieve_refined(bm25, query, k=candidate_k, filter_question=original,
+                                   metadata_filters=explicit)
         if not lexical["candidate_count"]:
             return []
         filters = lexical["filters"]

@@ -11,7 +11,9 @@ class HybridRerankerTests(unittest.TestCase):
     def test_retrieval_modules_import_from_project_root(self) -> None:
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
-        for module in ("src.retrieval.hybrid", "src.retrieval.reranker", "src.retrieval.cross_encoder"):
+        for module in ("src.retrieval.hybrid", "src.retrieval.reranker", "src.retrieval.cross_encoder",
+                       "src.retrieval.filters", "src.retrieval.multi_query",
+                       "src.main.query_pipeline"):
             with self.subTest(module=module):
                 result = subprocess.run(
                     [sys.executable, "-B", "-c", f"import {module}"],
@@ -66,6 +68,29 @@ class HybridRerankerTests(unittest.TestCase):
         self.assertEqual(result[0].page_content, "high")
         self.assertEqual(result[0].metadata["rerank_score"], 0.9)
         self.assertEqual(candidates[1].metadata, {})
+
+    def test_reranker_forwards_metadata_filters_mapping_unchanged(self) -> None:
+        from langchain_core.runnables import RunnableLambda
+        from src.retrieval.reranker import build_reranked_retriever
+
+        filters = {"tickers": ["VJC"], "years": [2022], "scopes": ["consolidated"]}
+        inputs = {"question": "Doanh thu VJC 2022", "metadata_filters": filters}
+        expected = {"question": "Doanh thu VJC 2022",
+                    "metadata_filters": {"tickers": ["VJC"], "years": [2022],
+                                         "scopes": ["consolidated"]}}
+        received = []
+
+        def retrieve(value):
+            received.append(value)
+            return [Document(page_content="only")]
+
+        class Encoder:
+            def score(self, pairs):
+                return [0.5 for _ in pairs]
+
+        build_reranked_retriever(RunnableLambda(retrieve), Encoder(), k=1).invoke(inputs)
+        self.assertEqual(received, [expected])
+        self.assertEqual(inputs, expected)
 
 
 if __name__ == "__main__":
