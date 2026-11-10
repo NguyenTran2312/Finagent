@@ -322,3 +322,15 @@ Một subagent mới đã đọc thiết kế và đối chiếu code ở chế 
 "nothing important left" — không còn câu hỏi quan trọng bắt buộc phải trả lời để
 lập implementation plan. Đây là kiểm tra độ đầy đủ của thiết kế, không thay thế
 code review hoặc kết quả kiểm thử phần triển khai.
+
+## 14. Ghi chú xác minh (2026-11-10)
+
+Đối chiếu lại với commit 5e2fd24; không thay đổi quyết định thiết kế đã duyệt.
+
+- §2/§12: các file khung không còn untracked; đã được commit trong 5e2fd24.
+  Không cần bước sao chép có kiểm tra SHA256.
+- Bản `src/query_paraphrase/prompts.py` trong working tree chính có chỉnh sửa
+  chưa commit gây SyntaxError (dòng 185). Triển khai dùng worktree từ 5e2fd24,
+  không mang theo chỉnh sửa này.
+- Các rủi ro kỹ thuật và sửa đổi tối thiểu được ghi trong plan, mục
+  "Verification amendments (2026-11-10)".

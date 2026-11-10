@@ -21,7 +21,7 @@
 - Nullable LLM fields required explicitly; extra fields forbidden; strict primitive types.
 - LLM callable/client injected; no API key, GPU or network required for basic tests.
 - Invalid/ambiguous output cannot reach retrieval. Semantic checks are explicitly bounded.
-- Preserve original untracked skeletons when copying into a dedicated worktree/branch.
+- New production modules and new tests import project code only via `src.*` (`config.settings` unchanged); boundaries accept mappings and re-validate foreign Pydantic instances via `model_dump()`, never rely on `isinstance` across import paths.
 - Implement sequentially, RED → GREEN → REFACTOR; review each task before its dependent task.
 
 ## Review Focus
@@ -32,9 +32,22 @@
 4. Primary retrieval errors must not trigger an unfiltered fallback; partial supplemental failure must remain visible (Task 5 tests).
 5. Empty/invalid structured filters, mutable model inputs and conflicting legacy/new filter arguments must fail safely or preserve documented semantics (Task 2/3 tests).
 
+## Verification amendments (2026-11-10, against commit 5e2fd24)
+
+Plan re-verified against current code; approved design unchanged. Owning tasks below carry the tests.
+
+- R1 (Global, Task 2/5): `hybrid.py` imports `src.main.refine_questions` while existing tests import bare `main.*`/`retrieval.*`; one module can load under two names. Use `src.*` imports for new code/tests; extend `test_retrieval_modules_import_from_project_root` to `src.retrieval.filters`, `src.retrieval.multi_query`, `src.main.query_pipeline`.
+- R2 (Task 5): all-empty filters make BM25 accept every document and Hybrid send `where=None`. `retrieve_subqueries` must reject empty scopes before any invoke.
+- R3 (Task 2): BM25 upper-cases metadata tickers but Chroma `$in` is exact. `MetadataFilters` normalizes tickers with `strip().upper()` and rejects blanks.
+- R4 (Task 3/5): `refine_question` maps "công ty mẹ" to separate. Validator reuses only its years (`default_scope=None`), never its scopes; new flow never calls `refine_question`.
+- R5 (Task 5): retrieval errors caught are an injected tuple, default `(TimeoutError, ConnectionError, OSError)`; ValueError/KeyError/TypeError propagate.
+- R6 (Task 5): worst case ≈ max_subqueries × (primary + notes/letters) sequential hybrid+rerank passes; document the bound and assert call count.
+- R7 (Task 3): BaseModel input is always re-validated via `QueryPlan.model_validate(raw.model_dump(), strict=True)`.
+- Unverified: strict provider structured output may reject `context_refs` dict/defaulted fields (no live API check); a CSV ticker absent from the corpus yields `empty`.
+
 ## File responsibilities and dependencies
 
-- `src/query_paraphrase/schemas.py`: strict LLM and result models, QATurn and settings model.
+- `src/query_paraphrase/schemas.py`: strict LLM and result models, QATurn, SemanticReview (settings live in `config/settings.py`).
 - `src/query_paraphrase/metric_catalog.py`: explicit canonical accounting aliases, specific-first matching.
 - `src/query_paraphrase/entities.py`: CSV registry and verified injected aliases; no fuzzy matching.
 - `config/settings.py`: lazy constructor-time paraphrasing config from environment, no secrets/provider defaults.
@@ -50,23 +63,25 @@ Dependency order: Task 1 → Task 2 (independent contract, executed sequentially
 
 ## Execution setup (before product changes)
 
-- [ ] Create `codex/query-paraphrasing` in an isolated worktree via using-git-worktrees. Prefer a supported native worktree tool with a safe destination; otherwise use `.worktrees/query-paraphrasing` under the repo and gitignore `.worktrees/` before creation.
-- [ ] Copy only original untracked skeleton files into the worktree, verifying source/destination SHA256. Do not move/delete/stash originals. Do not copy .venv, caches, corpus or credentials.
-- [ ] Run baseline from worktree using `D:\finance_project\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`, with PYTHONPATH set to worktree root plus its src. Record counts, skips, failures and runtime. Fix no baseline failure without systematic-debugging; separate unrelated existing failures from feature regressions.
+Updated 2026-11-10: skeleton files are tracked since `5e2fd24`; `.worktrees/` is already ignored (`9c6d577`). A prior run left branch `codex/query-paraphrasing` (base 176e47e) in `.worktrees/query-paraphrasing` with an uncommitted Task 1 RED test; leave it untouched.
+
+- [ ] Create branch `feat/query-paraphrasing-impl` from `feat/query-paraphrasing` (5e2fd24) in `.worktrees/query-paraphrasing-v2` via using-git-worktrees. Do not carry over the main checkout's uncommitted `prompts.py` edit.
+- [ ] Copy `tests/test_query_contracts.py` from `.worktrees/query-paraphrasing` and change its `query_paraphrase.*` imports to `src.query_paraphrase.*`. Do not copy .venv, caches, corpus or credentials.
+- [ ] Run baseline from worktree using `D:\finance_project\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`, with PYTHONPATH set to worktree root plus its src and TEMP/TMP set to a writable `<worktree>\.tmp-tests`. Expect ~64 tests, 3 PostgreSQL skips, plus test_query_contracts RED. Record counts, skips, failures and runtime. Fix no baseline failure without systematic-debugging; separate unrelated existing failures from feature regressions.
 - [ ] Use explicit worktree cwd for every worker and review. Commit only owned files; no force pushes, merges or deployment.
 
 ### Task 1: Strict contracts, metric catalog and company registry
 
-**Files:** Complete `src/query_paraphrase/schemas.py`; create `metric_catalog.py`, `entities.py`; modify `config/settings.py`; create `tests/test_query_contracts.py`.
+**Files:** Complete `src/query_paraphrase/schemas.py`; create `metric_catalog.py`, `entities.py`; modify `config/settings.py`; `tests/test_query_contracts.py` (ported RED file, see setup).
 
 **Consumes:** approved schema, local CSV, existing fold_text/clean_text helpers.
 
 **Produces interfaces:**
 
 - `ParaphraseSettings` with approved defaults and bounds; `load_paraphrase_settings(**overrides) -> ParaphraseSettings` resolves environment at call time. Use FINAGENT_PARAPHRASE_MAX_SUBQUERIES, MAX_HISTORY_TURNS, MAX_INPUT_CHARS, DEFAULT_REPORT_SCOPE and NOTES_FALLBACK (all with FINAGENT_PARAPHRASE_ prefix).
-- `QATurn(question, answer=None)`, `Subquery`, `QueryRelationship`, `QueryPlan`, `ValidationIssue`, `ParaphraseResult`, `SemanticReview(status, reason)`.
+- `QATurn(question, answer=None)`, `Subquery`, `QueryRelationship(kind, subquery_ids, description)` with kind in lookup|compare|aggregate|calculate, `QueryPlan`, `ValidationIssue`, `ParaphraseResult`, `SemanticReview(status, reason)`.
 - `find_metrics(text: str) -> set[str]`, `normalize_metric(text: str) -> str | None`, `METRIC_CATALOG`.
-- `EntityRegistry.from_csv(path, aliases=None)`, `.resolve(name: str) -> set[str]`, `.find_mentions(text: str) -> set[str]`, `.company_name(ticker: str) -> str | None`. Aliases map alias to one ticker or a list; collisions remain sets. Unknown uppercase ticker candidates must be inspectable by validator without treating finance acronyms as companies.
+- `EntityRegistry.from_csv(path, aliases=None)`, `.resolve(name: str) -> set[str]`, `.find_mentions(text: str) -> set[str]`, `.company_name(ticker: str) -> str | None`, `.unknown_ticker_candidates(text: str) -> set[str]`. CSV header is `Mã CK,Tên công ty`. Aliases map alias to one ticker or a list; collisions remain sets. Unknown uppercase ticker candidates must be inspectable by validator without treating finance acronyms as companies.
 
 - [ ] Write unittest cases asserting all required nullable fields missing cause ValidationError, empty/extra fields and bool/string year fail, valid null metadata passes; settings load defaults 8/5/8000/consolidated/true and reject malformed env values.
 - [ ] Write catalog tests asserting LNST→profit_after_tax, LNTT→profit_before_tax, net revenue distinct from revenue, parent share/consolidated profits distinct, longest metric suppresses contained generic matches, unknown metric→None.
@@ -83,7 +98,7 @@ Dependency order: Task 1 → Task 2 (independent contract, executed sequentially
 **Produces interfaces:** `MetadataFilters(tickers: list[str], years: list[int], scopes: list[str])`; `retrieve_refined(..., metadata_filters: MetadataFilters | dict | None = None)`; Hybrid mapping accepts metadata_filters. Model serializes using existing plural filter keys. Parent normalized to separate. Reject filter_question together with metadata_filters.
 
 - [ ] Write tests with VJC 2022/2023 and HPG fixtures: invoke search text mentioning all years but explicit 2022 filter, assert lexical candidates and recorded Chroma where contain only VJC/2022/consolidated. Both branches use identical restrictions.
-- [ ] Add invalid type/year/unknown scope/extra field and conflicting input tests; verify no Dense call on invalid input. Verify empty dict is rejected as incomplete filter mapping; explicit empty lists mean unrestricted only for their fields. Verify no mutation and parent alias compatibility.
+- [ ] Add invalid type/year/unknown scope/extra field and conflicting input tests; verify no Dense call on invalid input. Verify empty dict is rejected as incomplete filter mapping; explicit empty lists mean unrestricted only for their fields. Verify no mutation and parent alias compatibility. Lowercase/padded tickers (`" vjc "`) normalize to `VJC` identically for BM25 and Chroma where; blank tickers fail (R3). Extend the import-from-root subprocess test with `src.retrieval.filters` (R1).
 - [ ] Pin legacy string/filter_question calls and reranker mapping forwarding, keeping current result types and default consolidated.
 - [ ] Run new tests for RED, then implement only structured filter selection/normalization and forwarding; preserve BM25 scoring/RRF unchanged.
 - [ ] Run `python -B -m unittest discover -s tests -p test_metadata_filters.py -v`, existing test_refine_questions.py and test_hybrid_reranker.py for GREEN; inspect/refactor minimally and rerun.
@@ -102,7 +117,8 @@ Dependency order: Task 1 → Task 2 (independent contract, executed sequentially
 - [ ] Add paired VJC-2022/HPG-2023 tests rejecting swapped bindings and Cartesian multiplication; verify the VJC-2022/2023 comparison permits exactly the two requested needs. For ambiguous supported binding/context return needs_clarification rather than guessing.
 - [ ] Test unknown/ambiguous entity input blocks retrieval even when model supplies a real different ticker; missing company without any mention can remain null. Verify full-name ticker resolution and metadata consistency, no fuzzy aliases.
 - [ ] Test follow-up "còn năm 2023?" inherits missing entity/metric only with valid context_refs; current year overrides history year; unrelated/answer-only/ambiguous/out-of-window context fails. Test original indexes after retaining last five turns and no scope separate inferred from parent-share profit.
-- [ ] Run test_query_validation.py for RED, implement bounded extraction/comparison using catalog/registry and existing year refinement where safe. Do not claim full semantic proof. Separate structural invalid, context/entity clarification, and semantic-not-run status; return plan=None on nonvalid.
+- [ ] Test "LNST thuộc cổ đông công ty mẹ VJC 2023" keeps scope=None and is valid (R4); a mutated or adapter-returned QueryPlan instance is re-validated via `model_dump()` (R7).
+- [ ] Run test_query_validation.py for RED, implement bounded extraction/comparison using catalog/registry and only the years from `refine_question(..., default_scope=None)`; never use its scopes. Do not claim full semantic proof. Separate structural invalid, context/entity clarification, and semantic-not-run status; return plan=None on nonvalid.
 - [ ] Run all Task 1/3 tests for GREEN, simplify repeated checks, rerun; obtain both reviews and commit.
 
 ### Task 4: Vietnamese prompt and injectable paraphrasing service
@@ -126,11 +142,12 @@ Dependency order: Task 1 → Task 2 (independent contract, executed sequentially
 
 **Consumes:** ParaphraseResult, settings, Subquery; Task 2 retriever mapping.
 
-**Produces interfaces:** `RetrievalPolicy(default_report_scope='consolidated', notes_fallback=True)`; `retrieve_subqueries(result: ParaphraseResult, retriever, *, policy=None) -> list[EvidenceGroup]`; `build_query_pipeline(paraphraser, retriever, *, policy=None)` returns RunnableLambda. Define EvidenceGroup/PipelineResult as small dataclasses or Pydantic models locally; expose status, subquery, filters, primary_evidence, supplemental_evidence, warnings and verification labels. No new retrieval algorithm.
+**Produces interfaces:** `RetrievalPolicy(default_report_scope='consolidated', notes_fallback=True)`; `retrieve_subqueries(result: ParaphraseResult, retriever, *, policy=None, retrieval_errors: tuple[type[Exception], ...] = (TimeoutError, ConnectionError, OSError)) -> list[EvidenceGroup]`; `build_query_pipeline(paraphraser, retriever, *, policy=None)` returns RunnableLambda. Define EvidenceGroup/PipelineResult as small dataclasses or Pydantic models locally; expose status, subquery, filters, primary_evidence, supplemental_evidence, warnings and verification labels. No new retrieval algorithm.
 
 - [ ] Write tests asserting invalid/needs_clarification/unavailable results produce zero calls; two VJC years produce two exact mappings without filter_question; each group preserves its own Documents/scores and original source metadata.
 - [ ] Add explicit consolidated/separate and default-policy tests; requested scope remains None when policy supplies default. Notes go only to supplemental with scope_verified=false/report_scope=None, never primary. Explicit letters and combined document types remain distinct; notes-only scoped result is partial.
 - [ ] Test one explanations fallback on empty primary, no fallback after primary errors, no widening ticker/year/scope. Supplemental errors remain visible, continue other groups, overall partial/error rules; all empty→empty. Period/unit requests retain metadata and period_verified=false warning.
+- [ ] Test empty scopes produce zero retriever calls (R2); only injected `retrieval_errors` become group errors while ValueError/KeyError/TypeError propagate (R5); `refine_question` is never called in the new flow (R4); total retriever calls ≤ max_subqueries × passes (R6). Extend the import-from-root subprocess test with `src.retrieval.multi_query` and `src.main.query_pipeline` (R1).
 - [ ] Add pipeline integration with real in-memory BM25 plus fake filtered Dense store and fake encoder. Check actual results and recorded per-subquery where, RRF/rerank scores, string/history entrypoints, multiple metrics/entities and retained relationship metadata.
 - [ ] Run test_multi_query.py for RED; implement sequential orchestration and result grouping; catch only documented retrieval runtime failures and preserve diagnostics without credentials/raw provider errors. Pass exact mappings through existing reranker.
 - [ ] Run new integrations and full local unittest discovery for GREEN. Document complete usage including injected callable and LangChain adapter, supported entity aliases/context forms, environment options, safe failures, corpus period/scope limitations and untested live API.
