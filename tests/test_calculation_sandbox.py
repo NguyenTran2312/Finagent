@@ -113,9 +113,32 @@ class CheckCodeTests(unittest.TestCase):
                      "def solution():\n    for _x in [1]: pass",
                      "def solution(): return __builtins__",
                      "def solution(): return answer(1, unit__x='count')",
-                     "def solution(): return dict(_a=1)"):
+                     "def solution(): return dict(_a=1)",
+                     "def solution(): return _index",
+                     "def solution(): return _x",
+                     "def solution():\n    _index = 1\n    return 1",
+                     "def solution():\n    __ = 1\n    return 1",
+                     "def solution(): return [1 for _num in [1]]"):
             with self.subTest(code):
                 self.assertTrue(check_code(code))
+
+    def test_bare_underscore_allowed(self):
+        for code in ("def solution():\n    for _ in range(3): pass\n    return answer(1, 'count')",
+                     "def solution(): return answer(len([1 for _ in range(2)]), 'count')",
+                     "def solution():\n    _, b = 1, 2\n    return answer(_ + b, 'count')"):
+            with self.subTest(code):
+                self.assertEqual(check_code(code), [])
+
+    def test_break_outside_loop_rejected_statically(self):
+        self.assertEqual(check_code("def solution():\n    break"),
+                         [SyntaxRejected(2, "Module", "invalid syntax: 'break' outside loop")])
+        issues = check_code("def solution():\n    x = 1\n    if x:\n        continue")
+        self.assertEqual([(i.line, i.node) for i in issues], [(4, "Module")])
+        self.assertIn("'continue' not properly in loop", issues[0].reason)
+        with mock.patch.object(sandbox.multiprocessing, "get_context",
+                               side_effect=AssertionError("spawned")):
+            result = run("def solution():\n    break", make_tree(), FactSet(VJC_2023), context())
+        self.assertEqual(result.kind, "rejected")
 
     def test_helper_and_builtin_shadowing_rejected(self):
         for code in ("def solution():\n    metric = 1\n    return metric",
@@ -365,8 +388,9 @@ class SandboxRunTests(unittest.TestCase):
         self.assertFailure(result, "runtime_error", "StartupFailure")
 
     def test_setup_error_names_class(self):
-        # `break` outside a loop passes the AST check but fails to compile in the child
-        result = self.run_code("def solution():\n    break")
+        # check_code now rejects `break` outside a loop; bypass it to reach the child's compile
+        with mock.patch.object(sandbox, "check_code", return_value=[]):
+            result = self.run_code("def solution():\n    break")
         self.assertFailure(result, "runtime_error", "StartupFailure:SyntaxError")
 
     def test_unlisted_builtin_is_name_error(self):
@@ -413,6 +437,16 @@ class SandboxRunTests(unittest.TestCase):
         result = self.run_code(code, facts)
         self.assertIsInstance(result, ExecutionResult)
         self.assertEqual((result.answer.kind, result.answer.value), ("ticker", "HPG"))
+
+    def test_bare_underscore_loop_runs(self):
+        code = ("def solution():\n"
+                "    n = 0\n"
+                "    for _ in range(3):\n"
+                "        n += 1\n"
+                "    return answer(n + len([_ for _ in range(2)]), 'count')")
+        result = self.run_code(code)
+        self.assertIsInstance(result, ExecutionResult)
+        self.assertEqual((result.answer.kind, result.answer.value), ("count", 5))
 
     def test_startup_timeout_is_startup_failure(self):
         result = self.run_code("def solution(): return 1", startup_timeout=0.01)

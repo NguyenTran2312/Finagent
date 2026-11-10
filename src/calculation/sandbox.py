@@ -3,9 +3,10 @@
 The code is untrusted. Defence layers:
 
 1. `check_code` accepts exactly one top-level `def solution():` built from a small whitelist
-   of AST nodes (spec §10). Attribute access, names starting with `_` or containing `__`,
-   imports, loops other than `for`, lambdas, nested defs, `**`, star unpacking, f-strings and
-   calls to anything but plain helper / allowed-builtin names are rejected. Helpers are
+   of AST nodes (spec §10) that also compiles. Attribute access, names starting with `_` or
+   containing `__` (except the bare name `_`), imports, loops other than `for`, lambdas,
+   nested defs, `**`, star unpacking, f-strings and calls to anything but plain helper /
+   allowed-builtin names are rejected. Helpers are
    closures whose `__closure__` reaches the FactSet and Trace, so forbidding every
    `Attribute` node is what keeps generated code away from those internals.
 2. Every numeric literal is rewritten to `_num("<source text>")`, i.e. an exact `Decimal` (D3).
@@ -137,7 +138,8 @@ _BAD_NAME = "names starting with '_' or containing '__' are forbidden"
 
 
 def _bad_identifier(name: str) -> bool:
-    return name.startswith("_") or "__" in name
+    # The bare throwaway name `_` is allowed; it is not an injected internal (_num, _index).
+    return name != "_" and (name.startswith("_") or "__" in name)
 
 
 class _SourceLines:
@@ -270,7 +272,15 @@ def check_code(code: str) -> list[SyntaxRejected]:
             checker.visit(statement, solution.lineno)
     except RecursionError:
         checker.issues.append(SyntaxRejected(solution.lineno, "Module", "code is nested too deeply"))
-    return issues + checker.issues
+    issues += checker.issues
+    if not issues:  # compiler-only errors, e.g. `break` outside a loop
+        try:
+            compile(module, "<solution>", "exec", dont_inherit=True)
+        except SyntaxError as exc:
+            issues.append(SyntaxRejected(exc.lineno or 0, "Module", f"invalid syntax: {exc.msg}"))
+        except (ValueError, RecursionError, MemoryError) as exc:
+            issues.append(SyntaxRejected(0, type(exc).__name__, "code cannot be compiled"))
+    return issues
 
 
 # ---- child process --------------------------------------------------------------------
