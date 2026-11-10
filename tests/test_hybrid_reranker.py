@@ -12,7 +12,8 @@ class HybridRerankerTests(unittest.TestCase):
         environment = os.environ.copy()
         environment.pop("PYTHONPATH", None)
         for module in ("src.retrieval.hybrid", "src.retrieval.reranker", "src.retrieval.cross_encoder",
-                       "src.retrieval.filters"):
+                       "src.retrieval.filters", "src.retrieval.multi_query",
+                       "src.main.query_pipeline"):
             with self.subTest(module=module):
                 result = subprocess.run(
                     [sys.executable, "-B", "-c", f"import {module}"],
