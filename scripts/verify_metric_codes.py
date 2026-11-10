@@ -4,6 +4,8 @@ Not imported by tests. Run from the repository root:
 
     python -I -X utf8 scripts/verify_metric_codes.py [DB_PATH]
 
+DB_PATH defaults to data/databases/corpus.sqlite3 under the repository root.
+
 Corporate leaves: for a fixed sample of consolidated reports of VAS (Circular 200)
 companies, every row of every table whose statement_kind equals the leaf's is read;
 rows whose "Mã số" equals one of the leaf's codes are collected and the most common
@@ -43,7 +45,7 @@ import yaml  # noqa: E402
 from src.calculation.metric_tree import DEFAULT_METRICS_DIR, MetricTree  # noqa: E402
 from src.preprocess.cleaner import fold_text  # noqa: E402
 
-DEFAULT_DB = Path("D:/finance_project/data/databases/corpus.sqlite3")
+DEFAULT_DB = REPO_ROOT / "data" / "databases" / "corpus.sqlite3"
 SEED = 20261110
 CORPORATE_SAMPLE = 20
 BANK_SAMPLE = 10
@@ -256,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="ticker CSV (default: <db>/../../code_stock.csv)")
     args = parser.parse_args(argv)
     if not args.db.is_file():
-        parser.error(f"database not found: {args.db}")
+        parser.error(f"database not found: {args.db} (pass DB_PATH explicitly when the "
+                     "corpus is not under this checkout's data/databases/)")
     code_stock = args.code_stock or args.db.resolve().parents[1] / "code_stock.csv"
     tree = MetricTree.load()
     banks, corporates = load_tickers(code_stock)
