@@ -1,0 +1,184 @@
+# Bank (credit institution) statement leaves. Bank statements number lines with
+# roman numerals plus locally repeated numbers (ACB 2022: "VI Cho vay khách hàng"
+# -> "1 Cho vay khách hàng" -> "2 Dự phòng rủi ro cho vay khách hàng"), so leaves
+# carry no codes and are found by label (decision D2): codes: [], at least two
+# aliases, and an optional parent naming the section leaf. Aliases were checked
+# against the corpus with scripts/verify_metric_codes.py (manual, read-only).
+# The template ("bank") comes from this file name (ruling R1).
+
+# ---- income statement ---------------------------------------------------
+- id: interest_and_similar_income
+  label_vi: Thu nhập lãi và các khoản thu nhập tương tự
+  aliases: [thu nhập lãi và các khoản thu nhập tương tự, thu nhập lãi và các khoản tương tự,
+            thu nhập lãi và thu nhập tương tự]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: interest_and_similar_expenses
+  label_vi: Chi phí lãi và các chi phí tương tự
+  aliases: [chi phí lãi và các chi phí tương tự, chi phí lãi và các khoản chi phí tương tự,
+            chi phí lãi và chi phí tương tự]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: net_interest_income
+  label_vi: Thu nhập lãi thuần
+  aliases: [thu nhập lãi thuần, thu nhập lãi ròng]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: net_fee_income
+  label_vi: Lãi thuần từ hoạt động dịch vụ
+  aliases: [lãi thuần từ hoạt động dịch vụ, lãi/lỗ thuần từ hoạt động dịch vụ,
+            thu nhập thuần từ hoạt động dịch vụ]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: operating_expenses
+  label_vi: Chi phí hoạt động
+  aliases: [chi phí hoạt động, tổng chi phí hoạt động]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+# Owns the pre-provision profit line (IX) so it does not resolve to the provision
+# expense (X) whose label it contains.
+- id: operating_profit_before_provision
+  label_vi: Lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro tín dụng
+  aliases: [lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro tín dụng,
+            lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro,
+            lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng,
+            lợi nhuận thuần từ hđkd trước chi phí dự phòng rủi ro tín dụng,
+            lợi nhuận trước dự phòng]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: credit_risk_provision_expense
+  label_vi: Chi phí dự phòng rủi ro tín dụng
+  aliases: [chi phí dự phòng rủi ro tín dụng, chi phí dự phòng rủi ro, chi phí dự phòng tín dụng,
+            chi phí dự phòng]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: profit_before_tax
+  label_vi: Tổng lợi nhuận trước thuế
+  aliases: [lntt, lợi nhuận trước thuế, tổng lợi nhuận trước thuế,
+            tổng lợi nhuận kế toán trước thuế, lợi nhuận kế toán trước thuế]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: profit_after_tax
+  label_vi: Lợi nhuận sau thuế
+  aliases: [lnst, lợi nhuận sau thuế, lợi nhuận sau thuế tndn,
+            lợi nhuận sau thuế thu nhập doanh nghiệp]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
+# ---- balance sheet ------------------------------------------------------
+- id: total_assets
+  label_vi: Tổng tài sản
+  aliases: [tổng tài sản, tổng tài sản có, tổng cộng tài sản, tổng nguồn vốn,
+            nợ phải trả và vốn chủ sở hữu, tổng nợ phải trả và vốn chủ sở hữu]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+
+# Section VI "Cho vay khách hàng" prints the same label as its child line 1, and an
+# alias can belong to one node only; the plain label belongs to the gross child.
+# The section (net of provision) is located by its position (roman numeral row
+# that heads the child lines), its own aliases name the net amount.
+- id: customer_loans_section
+  label_vi: Cho vay khách hàng (thuần, sau dự phòng)
+  aliases: [cho vay khách hàng thuần, dư nợ cho vay khách hàng thuần,
+            cho vay khách hàng sau dự phòng]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: customer_loans_gross
+  label_vi: Cho vay khách hàng
+  aliases: [cho vay khách hàng, dư nợ cho vay khách hàng, tổng dư nợ cho vay khách hàng]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+  parent: customer_loans_section
+
+- id: customer_loan_provision
+  label_vi: Dự phòng rủi ro cho vay khách hàng
+  aliases: [dự phòng rủi ro cho vay khách hàng, dự phòng cho vay khách hàng,
+            dự phòng rủi ro tín dụng cho vay khách hàng]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+  parent: customer_loans_section
+
+- id: deposits_at_other_credit_institutions
+  label_vi: Tiền gửi tại các tổ chức tín dụng khác
+  aliases: [tiền gửi tại các tổ chức tín dụng khác, tiền gửi tại các tctd khác,
+            tiền gửi tại tổ chức tín dụng khác]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: customer_deposits
+  label_vi: Tiền gửi của khách hàng
+  aliases: [tiền gửi của khách hàng, tiền gửi khách hàng]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: liabilities
+  label_vi: Tổng nợ phải trả
+  aliases: [tổng nợ phải trả, nợ phải trả]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: owners_equity
+  label_vi: Vốn chủ sở hữu
+  aliases: [vốn chủ sở hữu, tổng vốn chủ sở hữu]
+  statement_kind: balance_sheet
+  codes: []
+  period_kind: closing
+  source: statement
+  dimension: money
