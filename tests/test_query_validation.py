@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from config.settings import ParaphraseSettings
 from src.query_paraphrase.entities import EntityRegistry
 from src.query_paraphrase.metric_catalog import METRIC_CATALOG
-from src.query_paraphrase.schemas import QATurn, QueryPlan
+from src.query_paraphrase.schemas import QATurn, QueryPlan, Subquery
 from src.query_paraphrase.validator import prepare_history, validate_plan
 
 
@@ -299,7 +299,7 @@ class PreservationTests(ValidationTestCase):
             ("So sánh doanh thu VJC năm 2022 và 2023", "compare", "lookup"),
             ("Tăng trưởng doanh thu VJC năm 2023 so với 2022", "calculate", "compare"),
             ("Chênh lệch doanh thu VJC năm 2022 và 2023", "calculate", "lookup"),
-            ("Tổng doanh thu VJC năm 2022 và 2023", "aggregate", "lookup"),
+            ("Doanh thu VJC năm 2022 cộng năm 2023", "aggregate", "lookup"),
         ]
         for question, right, wrong in cases:
             with self.subTest(question=question):
@@ -546,6 +546,101 @@ class HistoryTests(ValidationTestCase):
                            "context_value_not_in_history")
         self.assertInvalid(self.follow_up(history, refs, scope="separate", **fields),
                            "invented_scope")
+
+
+class ReviewFixRoundOneTests(ValidationTestCase):
+    """Regressions for review findings on the first Task 3 implementation."""
+    HISTORY = [QATurn(question="Doanh thu VJC năm 2022 là bao nhiêu?")]
+
+    def test_nested_models_in_mapping_are_revalidated_and_not_aliased(self):
+        bad_types = Subquery.model_validate(sq(ticker="VJC", year=2023, metric="revenue"))
+        bad_types.document_types = ["everything"]
+        bad_refs = Subquery.model_validate(sq(ticker="VJC", year=2023, metric="revenue"))
+        bad_refs.context_refs["bogus"] = 0
+        for nested in (bad_types, bad_refs):
+            with self.subTest(nested=nested.document_types):
+                payload = plan(Q_VJC)
+                payload["subqueries"] = [nested]
+                self.assertInvalid(run(payload, Q_VJC), "schema_invalid")
+        good = Subquery.model_validate(sq(ticker="VJC", year=2023, metric="revenue"))
+        payload = plan(Q_VJC)
+        payload["subqueries"] = [good]
+        result = run(payload, Q_VJC)
+        self.assertValid(result)
+        self.assertIsNot(result.plan.subqueries[0], good)
+        self.assertIsNot(result.plan.subqueries[0].document_types, good.document_types)
+        self.assertIsNot(result.plan.subqueries, payload["subqueries"])
+
+    def test_reworded_duplicate_need_is_invalid(self):
+        question = "Tổng doanh thu VJC năm 2022 và 2023"
+        needs = [sq("q1", ticker="VJC", year=2022, metric="revenue"),
+                 sq("q2", ticker="VJC", year=2023, metric="revenue"),
+                 sq("q3", ticker="VJC", year=2022, metric="revenue",
+                    search="Doanh thu năm 2022 của VJC")]
+        relation = [{"kind": "aggregate", "subquery_ids": ["q1", "q2", "q3"],
+                     "description": None}]
+        result = run(plan(question, *needs, operation="aggregate", relationships=relation),
+                     question)
+        self.assertInvalid(result, "duplicate_subquery")
+
+    def test_metric_inheritance_needs_metric_reference_or_bare_follow_up(self):
+        question = "Còn vốn chủ sở hữu năm 2023?"
+        inherited = plan(question, sq(ticker="VJC", year=2023, metric="revenue",
+                                      refs={"ticker": 0, "metric": 0}))
+        self.assertClarify(run(inherited, question, self.HISTORY),
+                           "unverified_metric_inheritance")
+        own_metric = plan(question, sq(ticker="VJC", year=2023, metric_text="vốn chủ sở hữu",
+                                       refs={"ticker": 0}))
+        self.assertValid(run(own_metric, question, self.HISTORY))
+
+    def test_follow_up_resolving_nothing_needs_clarification(self):
+        question = "Còn năm 2023?"
+        result = run(plan(question, sq(year=2023)), question, self.HISTORY)
+        self.assertClarify(result, "unresolved_follow_up")
+
+    def test_single_year_group_inside_entities_is_ambiguous(self):
+        cases = {"Doanh thu VJC năm 2022 và HPG": [("VJC", 2022), ("HPG", 2022)],
+                 "Doanh thu VJC 2022 và 2023 so với HPG": [("VJC", 2022), ("VJC", 2023),
+                                                          ("HPG", 2022), ("HPG", 2023)]}
+        for question, pairs in cases.items():
+            needs = [sq(f"q{i}", ticker=t, year=y, metric="revenue")
+                     for i, (t, y) in enumerate(pairs)]
+            with self.subTest(question=question):
+                self.assertClarify(run(plan(question, *needs), question), "ambiguous_binding")
+        leading = "Doanh thu năm 2022 và 2023 của VJC và HPG"
+        needs = [sq(f"q{i}", ticker=t, year=y, metric="revenue")
+                 for i, (t, y) in enumerate(cases["Doanh thu VJC 2022 và 2023 so với HPG"])]
+        self.assertValid(run(plan(leading, *needs), leading))
+
+    def test_relationship_kind_must_match_operation(self):
+        question = "So sánh doanh thu VJC 2022 và 2023"
+        needs = (sq("q1", ticker="VJC", year=2022, metric="revenue"),
+                 sq("q2", ticker="VJC", year=2023, metric="revenue"))
+        relation = [{"kind": "aggregate", "subquery_ids": ["q1", "q2"], "description": None}]
+        self.assertInvalid(run(plan(question, *needs, operation="compare",
+                                    relationships=relation), question), "operation_mismatch")
+
+    def test_line_items_are_not_operation_cues_and_aggregate_needs_operands(self):
+        cases = [("Tổng doanh thu của VJC năm 2023", dict(ticker="VJC", metric="revenue")),
+                 ("Tổng lợi nhuận kế toán trước thuế của VJC năm 2023",
+                  dict(ticker="VJC", metric_text="tổng lợi nhuận kế toán trước thuế")),
+                 ("Tỷ lệ nợ xấu của VCB năm 2023", dict(ticker="VCB", metric_text="tỷ lệ nợ xấu")),
+                 ("Tỷ lệ an toàn vốn của VCB năm 2023",
+                  dict(ticker="VCB", metric_text="tỷ lệ an toàn vốn"))]
+        for question, fields in cases:
+            with self.subTest(question=question):
+                self.assertValid(run(plan(question, sq(year=2023, **fields)), question))
+        question = cases[0][0]
+        self.assertInvalid(run(plan(question, sq(ticker="VJC", year=2023, metric="revenue"),
+                                    operation="aggregate"), question), "insufficient_operands")
+
+    def test_amount_word_ty_is_billion_vnd_unit(self):
+        question = "Doanh thu VJC năm 2023 là bao nhiêu tỷ?"
+        fields = dict(ticker="VJC", year=2023, metric="revenue")
+        self.assertValid(run(plan(question, sq(unit="tỷ đồng", **fields)), question))
+        self.assertInvalid(run(plan(question, sq(unit="triệu đồng", **fields)), question),
+                           "invented_unit")
+        self.assertInvalid(run(plan(question, sq(**fields)), question), "missing_unit")
 
 
 if __name__ == "__main__":

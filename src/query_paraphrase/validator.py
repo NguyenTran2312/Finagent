@@ -50,19 +50,27 @@ def _words(pattern: str) -> str:
     return r"(?<!\w)(?:" + pattern + r")(?!\w)"
 
 
-_UNITS = _compile((("billion_vnd", _words("t[ỷỉ] đồng")), ("million_vnd", _words("triệu đồng")),
+# "tỷ" after "bao nhiêu" or a number is the billion-VND amount word ("bao nhiêu tỷ").
+_UNITS = _compile((("billion_vnd", _words(r"t[ỷỉ] đồng|(?:bao nhiêu|\d+) t[ỷỉ](?! lệ)")),
+                   ("million_vnd", _words("triệu đồng")),
                    ("thousand_vnd", _words("(?:nghìn|ngàn) đồng")),
                    ("vnd", _words("vn[dđ]|(?:đơn vị|bằng|theo|bao nhiêu) đồng|^đồng$")),
                    ("percent", "%|" + _words("phần trăm")), ("usd", _words("usd"))))
 _OPERATIONS = _compile((("compare", _words("so sánh")), ("aggregate", _words("tổng|cộng")),
                         ("calculate", _words("chênh lệch|tăng trưởng|t[ỷỉ] lệ|thay đổi"))))
-# Line items and names containing "tổng"/"cộng" that do not ask for an aggregation.
-_NOT_OPERATIONS = re.compile(_words("tổng (?:cộng )?(?:tài sản|nguồn vốn)|tổng nợ|tổng công ty"
-                                    "|tổng giám đốc|cộng đồng|cộng (?:hòa|hoà)"))
+# Line items and names containing an operation cue that do not ask for that operation.
+_NOT_OPERATIONS = re.compile(_words(
+    "tổng (?:cộng )?(?:tài sản|nguồn vốn)|tổng nợ|tổng doanh thu|tổng lợi nhuận kế toán"
+    " trước thuế|tổng công ty|tổng giám đốc|cộng đồng|cộng (?:hòa|hoà)"
+    "|t[ỷỉ] lệ (?:nợ xấu|an toàn vốn)"))
 # Supported follow-up forms: leading "còn ...", "... thì sao", "công ty/doanh nghiệp/
 # chỉ tiêu đó|này", "năm đó". Other implicit references are not treated as inheritance.
 _FOLLOW_UP = re.compile(r"^\W*còn(?!\w)|"
                         + _words("thì sao|(?:công ty|doanh nghiệp|chỉ tiêu) (?:đó|này)|năm đó"))
+# A metric may be inherited only after "chỉ tiêu đó/này" or when the follow-up states
+# nothing beyond recognized constraints, markers and these (folded) filler words.
+_METRIC_REFERENCE = re.compile(_words("chỉ tiêu (?:đó|này)"))
+_FILLER = frozenset("con nam cua la bao nhieu thi sao the nao va ve voi o trong cho".split())
 _YEAR = re.compile(r"\b(?:19|20|21)\d{2}\b")
 
 
@@ -141,19 +149,26 @@ def prepare_history(qa_history, settings: ParaphraseSettings) -> list[tuple[int,
     return turns[-settings.max_history_turns:] if settings.max_history_turns else []
 
 
+def _plain(value):
+    """Copy to plain dict/list data; nested models are dumped so nothing is trusted or aliased."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(warnings=False)
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    return value  # scalars and other types; strict validation rejects the latter
+
+
 def _parse(raw):
     """Strictly parse JSON text, a mapping or any BaseModel (always re-validated)."""
     try:
         if isinstance(raw, str):
             return QueryPlan.model_validate_json(raw, strict=True), []
-        if isinstance(raw, BaseModel):
-            raw = raw.model_dump(warnings=False)
-        elif isinstance(raw, Mapping):
-            raw = dict(raw)
-        else:
+        if not isinstance(raw, (BaseModel, Mapping)):
             return None, [_issue(INVALID, "unsupported_output",
                                  f"unsupported LLM output type {type(raw).__name__}")]
-        return QueryPlan.model_validate(raw, strict=True), []
+        return QueryPlan.model_validate(_plain(raw), strict=True), []
     except ValidationError as error:
         malformed = any(e["type"] == "json_invalid" for e in error.errors())
         return None, [_issue(INVALID, "malformed_json" if malformed else "schema_invalid",
@@ -187,6 +202,19 @@ def _unknown_entities(text: str, registry: EntityRegistry) -> set[str]:
             if candidate not in names and not registry.resolve(candidate)}
 
 
+def _bare_follow_up(question: str, registry: EntityRegistry) -> bool:
+    """True when nothing remains besides recognized constraints, markers and filler words."""
+    text = _norm(_mask_weak_tickers(question, registry))
+    for pattern in (_FOLLOW_UP, *(pattern for _, pattern in _UNITS)):
+        text = pattern.sub(" ", text)
+    folded = fold_text(text)  # folding is stable, so spans index this string
+    for start, end, _ in reversed(registry.mention_spans(folded)):
+        folded = folded[:start] + " " + folded[end:]
+    for pattern in (_METRIC_PHRASES, _YEAR, *(p for _, p in _SCOPES + _PERIODS)):
+        folded = pattern.sub(" ", folded)
+    return not set(folded.split()) - _FILLER
+
+
 def _values(sq) -> dict[str, set]:
     """Recognized labels of a subquery's metadata (empty set when null/unrecognized)."""
     return {"ticker": {sq.ticker} if sq.ticker else set(),
@@ -210,7 +238,7 @@ def _pairs(folded: str, spans, years: set[int]):
             mentions[-1] = (previous[0], end, tickers)  # "VJC (CTCP Hàng không Vietjet)"
         else:
             mentions.append((start, end, tickers))
-    if len({t for _, _, tickers in mentions for t in tickers}) < 2 or len(years) < 2:
+    if len({t for _, _, tickers in mentions for t in tickers}) < 2 or not years:
         return None
     bounds = [start for start, _, _ in mentions[1:]] + [len(folded)]
     lead = _years_in(folded[:mentions[0][0]])
@@ -220,7 +248,9 @@ def _pairs(folded: str, spans, years: set[int]):
     if not lead and all(slots):
         return {(t, y) for (_, _, tickers), ys in zip(mentions, slots)
                 for t in tickers for y in ys}
-    return _AMBIGUOUS if sum(1 for slot in (lead, *slots) if slot) > 1 else None
+    # One year group shared by all entities only when it leads them or follows the last one.
+    groups = [position for position, slot in enumerate((lead, *slots)) if slot]
+    return None if groups in ([0], [len(slots)]) else _AMBIGUOUS
 
 
 def _structure_issues(plan: QueryPlan, question: str, settings: ParaphraseSettings):
@@ -233,7 +263,9 @@ def _structure_issues(plan: QueryPlan, question: str, settings: ParaphraseSettin
                                 f"subqueries exceed the limit of {settings.max_subqueries}")]
     seen = {}
     for sq in plan.subqueries:
-        key = (fold_text(sq.search_query), sq.ticker, sq.year, fold_text(sq.period), sq.scope,
+        # With a metric set, rewording the search text does not make a new need.
+        search = None if sq.metric or sq.metric_text else fold_text(sq.search_query)
+        key = (search, sq.ticker, sq.year, fold_text(sq.period), sq.scope,
                sq.metric, fold_text(sq.metric_text), _norm(sq.unit),
                tuple(sorted(sq.document_types)))
         if key in seen:
@@ -269,7 +301,14 @@ def _input_issues(question: str, facts, registry: EntityRegistry):
 
 def _subquery_issues(plan, question, facts, history, registry):
     follow_up = bool(_FOLLOW_UP.search(_norm(question)))
+    metric_reference = follow_up and (bool(_METRIC_REFERENCE.search(_norm(question)))
+                                      or _bare_follow_up(question, registry))
     turn_facts, inherited, issues = {}, {}, []
+    resolving = {"ticker", "company_name", "metric"}
+    if follow_up and not facts["ticker"] and not facts["metric"] and not any(
+            resolving & sq.context_refs.keys() for sq in plan.subqueries):
+        issues.append(_issue(CLARIFY, "unresolved_follow_up", "follow-up question names no "
+                             "company or metric and none is inherited from history"))
     for sq in plan.subqueries:
         def add(severity, code, message, sid=sq.id):
             issues.append(_issue(severity, code, message, sid))
@@ -290,6 +329,9 @@ def _subquery_issues(plan, question, facts, history, registry):
                     f"{field} is stated in the current question")
             elif not present[field]:
                 add(INVALID, "context_ref_unused", f"{field} refers to history but is null")
+            elif field == "metric" and not metric_reference:
+                add(CLARIFY, "unverified_metric_inheritance", "the question may state its own "
+                    "metric; a metric is inherited only after 'chỉ tiêu đó/này'")
             else:
                 if index not in turn_facts:
                     turn_facts[index] = _facts(history[index].question, registry)
@@ -395,9 +437,12 @@ def _operation_issues(plan: QueryPlan, question: str):
     if intents and plan.operation not in intents:
         issues.append(_issue(INVALID, "operation_mismatch", f"question asks for "
                              f"{'/'.join(sorted(intents))}, plan says {plan.operation}"))
-    if plan.operation == "lookup" and any(r.kind != "lookup" for r in plan.relationships):
+    if any(r.kind not in ("lookup", plan.operation) for r in plan.relationships):
         issues.append(_issue(INVALID, "operation_mismatch",
-                             "lookup plan carries compare/aggregate/calculate relationships"))
+                             f"a relationship kind differs from operation {plan.operation}"))
+    if plan.operation == "aggregate" and len(plan.subqueries) < 2:
+        issues.append(_issue(INVALID, "insufficient_operands",
+                             "aggregate operation needs at least two subqueries"))
     return issues
 
 
