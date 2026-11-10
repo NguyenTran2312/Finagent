@@ -67,6 +67,26 @@ class ProposalTests(unittest.TestCase):
         self.assertFalse(r.accepted)
         self.assertTrue(any("alias collision" in i for i in r.issues))
 
+    def test_alias_containing_existing_alias_accepted(self):
+        # A longer alias that merely CONTAINS an existing alias is not a collision.
+        cases = (
+            good(id="inventory_turnover", label_vi="Vòng quay hàng tồn kho",
+                 aliases=["vòng quay hàng tồn kho"], display="times",
+                 formulas=["abs(cost_of_goods_sold) / ((inventories + inventories[t-1]) / 2)"]),
+            good(id="pretax_margin", label_vi="Biên lợi nhuận trước thuế",
+                 aliases=["biên lợi nhuận trước thuế"], display="percent",
+                 formulas=["profit_before_tax / net_revenue"]),
+        )
+        for p in cases:
+            r = validate_proposal(self.tree, p, "corporate")
+            self.assertTrue(r.accepted, r.issues)
+            self.assertEqual(r.tree.find_by_alias(p["aliases"][0], "corporate"), {p["id"]})
+
+    def test_alias_accent_variant_collision_rejected(self):
+        r = validate_proposal(self.tree, good(aliases=["Hang Ton Kho"]), "corporate")
+        self.assertFalse(r.accepted)
+        self.assertTrue(any("alias collision" in i and "inventories" in i for i in r.issues), r.issues)
+
     def test_alias_in_unlisted_template_not_a_collision(self):
         existing = self.tree.derived("gross_margin").aliases[0]
         self.assertEqual(self.tree.find_by_alias(existing, "bank"), set())

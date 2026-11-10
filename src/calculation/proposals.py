@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from src.calculation.metric_tree import TEMPLATES, MetricTree, Template, TreeError, _parse_derived
+from src.preprocess.cleaner import fold_text
 
 _FILE = "<proposal>"
 
@@ -62,10 +63,12 @@ def validate_proposal(tree: MetricTree, proposal: Mapping[str, object], template
     if template not in node.templates:
         issues.append(f"template not listed: {template} not in {list(node.templates)}")
     for t in node.templates:
+        # Exact folded equality: find_by_alias would also match aliases merely contained in this one.
+        existing = tree._alias_index[t][0]
         for alias in node.aliases:
-            owners = tree.find_by_alias(alias, t)
-            if owners:
-                issues.append(f"alias collision: {alias!r} already used by {sorted(owners)[0]!r} ({t})")
+            owner = existing.get(fold_text(alias))
+            if owner is not None:
+                issues.append(f"alias collision: {alias!r} already used by {owner!r} ({t})")
     if issues:
         return reject(*issues)
     try:
