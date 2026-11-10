@@ -72,19 +72,29 @@ _SCALE_WORDS: dict[str, Decimal] = {
 }
 
 
+# "tỷ" starts the words tỷ trọng / tỷ lệ / tỷ số / tỷ suất (share, ratio), not a money scale.
+_NOT_A_SCALE = r"(?!\s+(?:trọng|lệ|số|suất)(?!\w))"
+
+
 def _word(phrase: str) -> str:
     """Regex for a phrase of whole words with any whitespace between them."""
-    return r"\s+".join(map(re.escape, phrase.split())) + r"(?!\w)"
+    pattern = r"\s+".join(map(re.escape, phrase.split())) + r"(?!\w)"
+    return pattern + _NOT_A_SCALE if phrase.endswith(("tỷ", "tỉ")) else pattern
 
 
 _UNIT_WORDS = sorted([*_SCALE_WORDS, "phần trăm"], key=len, reverse=True)
-_LITERAL_RE = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)*)(?!\d)(?:\s*(%|"
+# Digits inside an alphanumeric token (tickers PC1, C32, L14) are not stated numbers.
+_LITERAL_RE = re.compile(r"(?<![\w.,])(\d+(?:[.,]\d+)*)(?!\d)(?:\s*(%|"
                          + "|".join(map(_word, _UNIT_WORDS)) + r"))?")
 
 _YEAR_KIND_RE = re.compile(r"(?<!\w)năm nào(?!\w)")
 _TICKER_KIND_RE = re.compile(r"(?<!\w)(?:công ty|doanh nghiệp|ngân hàng) nào(?!\w)")
+# "bao nhiêu" + an entity counts with or without "có"; "năm 2023" / "đơn vị tính" are not
+# entities ("Doanh thu là bao nhiêu năm 2023?" asks for a quantity).
+_COUNT_ENTITY = (r"(?:doanh nghiệp|dn|công ty|ctcp|ngân hàng|mã|đơn vị(?! (?:tính|tiền))"
+                 r"|năm(?! ?\d))")
 _COUNT_KIND_RE = re.compile(
-    r"(?<!\w)có bao nhiêu (?:doanh nghiệp|dn|công ty|đơn vị|năm|ngân hàng)(?!\w)")
+    r"(?<!\w)(?:có bao nhiêu trong số|bao nhiêu " + _COUNT_ENTITY + r")(?!\w)")
 
 # The requested unit is the one attached to the question word ("bao nhiêu tỷ đồng",
 # "là bao nhiêu (%)", "(đơn vị: tỷ đồng)"); units elsewhere describe literals ("giảm 10%").
@@ -132,7 +142,7 @@ def question_literals(question: str) -> frozenset[Decimal]:
 
 def requested_answer_kind(question: str) -> AnswerKind:
     """year for "năm nào", ticker for "công ty/doanh nghiệp/ngân hàng nào", count for
-    "có bao nhiêu" + an entity or "năm"; otherwise quantity."""
+    "có bao nhiêu trong số" or "bao nhiêu" + an entity or "năm"; otherwise quantity."""
     text = _normalize(question)
     if _YEAR_KIND_RE.search(text):
         return "year"
@@ -272,7 +282,8 @@ def _provenance_facts(steps: list[TraceStep], facts: FactSet) -> list[GateIssue]
 
 def _formula(steps: list[TraceStep], tree: MetricTree, context: ExecutionContext,
              metrics_used: frozenset[str]) -> list[GateIssue]:
-    facts_read = {s.args[0] for s in steps if s.helper == "fact" and s.args}
+    # R2 + R17: a named leaf may be read by fact() or averaged by avg_balance()
+    facts_read = {s.args[0] for s in steps if s.helper in ("fact", "avg_balance") and s.args}
     issues = []
     for node_id in sorted(context.named_metrics):
         try:
@@ -283,7 +294,7 @@ def _formula(steps: list[TraceStep], tree: MetricTree, context: ExecutionContext
             continue
         if node_id in metrics_used or (kind == "leaf" and node_id in facts_read):
             continue
-        how = "metric()" if kind == "derived" else "metric() or fact()"
+        how = "metric()" if kind == "derived" else "metric(), fact() or avg_balance()"
         issues.append(_issue("formula", "error",
                              f"the question names {node_id!r} but the program never reads it "
                              f"with {how}"))

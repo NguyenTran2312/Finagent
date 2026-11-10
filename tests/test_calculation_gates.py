@@ -111,6 +111,53 @@ class QuestionParsingTests(unittest.TestCase):
         self.assertEqual(requested_answer_kind(plain), "quantity")
         self.assertIsNone(requested_unit(plain))
 
+    # Verbatim from data/questions/questions.jsonl.
+    REAL_COUNT_QUESTIONS = {
+        949: "Có bao nhiêu trong số các ngân hàng TMCP Á Châu, TMCP Quân đội, TMCP Xuất nhập "
+             "khẩu Việt Nam và TMCP Đầu tư và Phát triển Việt Nam có lãi thuần từ hoạt động kinh "
+             "doanh ngoại hối dương trong năm 2025 lớn hơn 1 nghìn tỷ đồng?",
+        965: "Trong năm 2022, có bao nhiêu trong số CTCP Phát triển Sunshine Homes công ty mẹ, "
+             "CTCP Dịch vụ Bất động sản Đất Xanh công ty mẹ và CTCP Tập đoàn C.E.O công ty mẹ có "
+             "giá trị Chi phí không được trừ khi tính thuế TNDN lớn hơn 20 tỷ đồng?",
+        966: "Có bao nhiêu trong số CTCP Tập đoàn Hà Đô, CTCP Điện Gia Lai và CTCP Thủy điện Đa "
+             "Nhim - Hàm Thuận - Đa Mi có dòng tiền thuần từ hoạt động kinh doanh lớn hơn 1 nghìn "
+             "tỷ đồng trong năm 2025?",
+        1010: "Bao nhiêu ngân hàng thuộc nhóm NVB, SGB, VIB, HDB và MSB có giá trị chênh lệch "
+              "thanh khoản ròng tổng thể dương vào cuối năm 2020?",
+    }
+
+    def test_count_kind_real_questions(self):
+        for qid, question in self.REAL_COUNT_QUESTIONS.items():
+            with self.subTest(qid):
+                self.assertEqual(requested_answer_kind(question), "count")
+                self.assertIsNone(requested_unit(question))
+
+    def test_count_kind_not_triggered_by_units(self):
+        for question in ("Doanh thu của VNM là bao nhiêu năm 2023?",
+                         "Doanh thu của VNM là bao nhiêu năm2023?",
+                         "Số dư là bao nhiêu đơn vị tiền tệ?",
+                         "Tổng tài sản là bao nhiêu (đơn vị tính: tỷ đồng)?",
+                         "ICR là bao nhiêu lần?"):
+            with self.subTest(question):
+                self.assertEqual(requested_answer_kind(question), "quantity")
+        self.assertEqual(requested_answer_kind("Trong bao nhiêu năm lợi nhuận dương?"), "count")
+        self.assertEqual(requested_answer_kind("Có bao nhiêu mã có ROE trên 15%?"), "count")
+
+    def test_question_literals_skip_ticker_digits_and_ratio_words(self):
+        ql = question_literals("PC1, C32 và L14 có ICR dưới 1,5 lần?")
+        self.assertEqual(ql, frozenset({D("1.5")}))
+        q976 = ("Tính tỷ trọng chi phí khấu hao trên tổng chi phí quản lý doanh nghiệp năm 2022 "
+                "của CTCP Tập đoàn Masan (MSN) công ty mẹ, CTCP Tập đoàn Thủy sản Minh Phú (MPC) "
+                "công ty mẹ, CTCP Sữa Việt Nam (VNM) công ty mẹ và CTCP Masan MeatLife (MML) công "
+                "ty mẹ, sau đó lấy trung bình của 4 tỷ trọng này theo đơn vị phần trăm.")
+        ql = question_literals(q976)
+        self.assertIn(D(4), ql)
+        self.assertNotIn(D("4000000000"), ql)
+        self.assertEqual(ql, frozenset({D(2022), D(4)}))
+        for word in ("lệ", "số", "suất"):
+            self.assertNotIn(D("3000000000"), question_literals(f"3 tỷ {word}"))
+        self.assertIn(D("3000000000"), question_literals("3 tỷ đồng"))
+
     def test_requested_unit_variants(self):
         cases = {
             "Biên lãi gộp thay đổi bao nhiêu điểm phần trăm?": "percentage_points",
@@ -230,6 +277,21 @@ class FormulaTests(unittest.TestCase):
         report = gates(code, lambda h: h["answer"](h["fact"]("net_revenue", "VJC", 2023), "ty"),
                        ctx=ctx)
         self.assertTrue(report.passed, report.issues)
+
+    def test_named_leaf_satisfied_by_avg_balance(self):  # R17
+        facts = [fact("total_assets", "52673371000000"),
+                 fact("total_assets", "48482664000000", year=2022)]
+        code = ('def solution():\n'
+                '    return answer(avg_balance("total_assets", "VJC", 2023), "ty")\n')
+        ctx = context(unit="ty", named={"total_assets"})
+        report = gates(code, lambda h: h["answer"](h["avg_balance"]("total_assets", "VJC", 2023),
+                                                   "ty"), facts=facts, ctx=ctx)
+        self.assertTrue(report.passed, report.issues)
+        ctx = context(unit="ty", named={"total_assets", "owners_equity"})
+        report = gates(code, lambda h: h["answer"](h["avg_balance"]("total_assets", "VJC", 2023),
+                                                   "ty"), facts=facts, ctx=ctx)
+        self.assertEqual([i.message.split("'")[1] for i in errors(report, "formula")],
+                         ["owners_equity"])
 
     def test_unknown_named_metric_is_error(self):
         report = gates(ICR_CODE, icr_program, ctx=context(named={"no_such_metric"}))

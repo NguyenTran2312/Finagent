@@ -34,7 +34,8 @@ class Report:
         self.templates = templates
         self.facts = []
 
-    def add(self, metric_id, ticker, year, printed, unit="triệu VND", *, restated=False):
+    def add(self, metric_id, ticker, year, printed, unit="triệu VND", *, restated=False,
+            scope="consolidated"):
         leaf = TREE.leaf(metric_id, self.templates[ticker])
         scale = SCALES[unit]
         n = len(self.facts) + 1
@@ -42,7 +43,7 @@ class Report:
                             page=n, row_label=leaf.label_vi, raw_text=printed, unit_text=unit,
                             scale=scale, column_header=str(year))
         value = parse_vn_decimal(printed, locale="vi") * scale
-        self.facts.append(Fact(metric_id, ticker, year, "consolidated", leaf.period_kind,
+        self.facts.append(Fact(metric_id, ticker, year, scope, leaf.period_kind,
                                Quantity(value, leaf.dimension), source, restated))
         return self
 
@@ -59,9 +60,9 @@ def claim(display_value, unit, dimension=Dimension.MONEY):
 
 class GoldenPrograms(unittest.TestCase):
     def check(self, question, report, code, *, kind="quantity", unit, expected, named=(),
-              claimed=None):
+              claimed=None, scope="consolidated"):
         context = ExecutionContext(
-            default_scope="consolidated", ticker_templates=dict(report.templates),
+            default_scope=scope, ticker_templates=dict(report.templates),
             question_literals=question_literals(question),
             requested_unit=requested_unit(question),
             requested_kind=requested_answer_kind(question), named_metrics=frozenset(named))
@@ -287,24 +288,28 @@ def solution():
         self.check(q, report, code, kind="year", unit="year", expected=2021,
                    claimed=Answer("year", 2021, "year"))
 
-    # 965 -- "có bao nhiêu" with a money(20, "ty") threshold
+    # 965 -- "có bao nhiêu trong số" with a money(20, "ty") threshold; parent-company scope
     def test_11_count_with_money_threshold(self):
-        q = ("Có bao nhiêu công ty trong nhóm VJC, HVN, ACV, SCS có chi phí lãi vay năm 2023 lớn "
-             "hơn 20 tỷ đồng?")
-        report = (Report(965, dict.fromkeys(("VJC", "HVN", "ACV", "SCS"), "corporate"))
-                  .add("interest_expense", "VJC", 2023, "(1.950.254.195.864)", "VND")
-                  .add("interest_expense", "HVN", 2023, "(4.012.345)")
-                  .add("interest_expense", "ACV", 2023, "(19.800)")
-                  .add("interest_expense", "SCS", 2023, "(1.234.567.890)", "VND"))
-        code = '''
+        # verbatim question 965
+        q = ("Trong năm 2022, có bao nhiêu trong số CTCP Phát triển Sunshine Homes công ty mẹ, "
+             "CTCP Dịch vụ Bất động sản Đất Xanh công ty mẹ và CTCP Tập đoàn C.E.O công ty mẹ có "
+             "giá trị Chi phí không được trừ khi tính thuế TNDN lớn hơn 20 tỷ đồng?")
+        # The tree has no leaf for non-deductible expenses (a tax note item); other_expenses is a
+        # stand-in leaf. The gates under test read the question, not the leaf's meaning.
+        # "công ty mẹ" -> separate (parent-company) statements.
+        report = (Report(965, dict.fromkeys(("SSH", "DXS", "CEO"), "corporate"))
+                  .add("other_expenses", "SSH", 2022, "25.000.000.000", "VND", scope="separate")
+                  .add("other_expenses", "DXS", 2022, "18.450", scope="separate")
+                  .add("other_expenses", "CEO", 2022, "31.512.345.678", "VND", scope="separate"))
+        code = """
 def solution():
-    tickers = ["VJC", "HVN", "ACV", "SCS"]
-    costs = [abs(fact("interest_expense", t, 2023)) for t in tickers]
-    return answer(count_if(costs, ">", money(20, "ty")), "count")
-'''
-        # 1950.25 tỷ, 4012.35 tỷ, 19.8 tỷ, 1.23 tỷ -> above 20 tỷ: VJC, HVN -> 2
-        self.check(q, report, code, kind="count", unit="count", expected=2,
-                   named={"interest_expense"})
+    tickers = ["SSH", "DXS", "CEO"]
+    values = [abs(fact("other_expenses", t, 2022)) for t in tickers]
+    return answer(count_if(values, ">", money(20, "ty")), "count")
+"""
+        # 25 tỷ, 18.45 tỷ, 31.51 tỷ -> above 20 tỷ: SSH, CEO -> 2
+        self.check(q, report, code, kind="count", unit="count", expected=2, scope="separate",
+                   claimed=Answer("count", 2, "count"))
 
     # bank template -- loan_to_deposit
     def test_12_bank_loan_to_deposit(self):
