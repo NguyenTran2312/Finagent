@@ -36,8 +36,11 @@ client = make_chat_model(model="...", timeout=30)      # caller's choice
 paraphraser = QueryParaphraser(structured_llm_adapter(client))
 ```
 
-The adapter calls `client.with_structured_output(QueryPlan)` once and invokes it per prompt;
-the returned object is still strictly re-validated.
+The adapter calls `client.with_structured_output(QueryPlan, include_raw=True)` once and
+invokes it per prompt. It passes on `parsed` only when `parsing_error` is None and `parsed`
+is set; any parse failure becomes `invalid` (`unsupported_output`) instead of raising, and
+the raw model text never reaches the result. The parsed object is still strictly
+re-validated.
 
 `reranked_retriever` is `build_reranked_retriever(build_hybrid_retriever(bm25, dense_store,
 k=..., candidate_k=...), cross_encoder, k=...)`. Loading BM25, embeddings, Chroma and the
@@ -51,6 +54,8 @@ validation and is called with keyword arguments `question`, `qa_history` and `pl
 truncation; `original_index` is the index that `context_refs` use. It must return a
 `SemanticReview(status="passed"|"failed"|"unknown", reason=...)` (or an equivalent mapping).
 `failed` -> `invalid`; `unknown` or a malformed review -> `needs_clarification`.
+The reviewer receives a deep copy of the plan; mutating it never changes the plan used for
+retrieval.
 Note the asymmetry: `validate_plan` receives the raw history, the reviewer receives the
 prepared pairs.
 
@@ -64,10 +69,26 @@ prepared pairs.
   "nam do". A metric is inherited only after "chi tieu do/nay" (or a bare follow-up that names
   nothing else). Inherited fields must be backed by `context_refs` pointing at history
   indexes; other implicit references are not inherited and ask for clarification.
+- A follow-up subquery that leaves `ticker` or `year` null while the current question
+  states none and a retained history question states one gives `needs_clarification`
+  (`unresolved_follow_up`): the value must be stated or inherited through `context_refs`,
+  never dropped (which would widen retrieval to every company or year).
+- A ticker written as a word in another case ("vjc", "gas") supports a plan that picks
+  that ticker, but when no subquery has a ticker it gives `needs_clarification`
+  (`ambiguous_entity_mention`).
+- Document types: `financial_statements` is always allowed. `explanations` requires
+  "thuyet minh" and `letters` (explanatory letters) requires "thu giai trinh" in the
+  accent-folded question; a subquery requesting either without its cue is `invalid`
+  (`invented_document_type`), and a cue that no subquery requests is `invalid`
+  (`missing_document_type`).
 
 ## Configuration
 
-Read at call time by `load_paraphrase_settings()` (defaults < environment < overrides):
+Read by `load_paraphrase_settings()` (defaults < environment < overrides) when the objects
+are built, not per request: `QueryParaphraser` resolves `settings=None` at construction and
+`build_query_pipeline` resolves `policy=None` once when the pipeline is built; a direct
+`retrieve_subqueries(..., policy=None)` call resolves it for that call. Later environment
+changes do not affect an existing paraphraser or pipeline.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -84,9 +105,13 @@ Invalid values raise `ValueError` rather than being corrected.
 `ParaphraseResult.status`:
 
 - `valid`: plan passed deterministic validation (and the reviewer, when configured).
-- `needs_clarification`: ambiguous or unresolved input (unknown entity, unresolved follow-up,
-  ambiguous binding, unknown semantic review). No retrieval happens.
-- `invalid`: malformed or inconsistent model output, or a failed semantic review.
+- `needs_clarification`: ambiguous or unresolved input (unknown entity, unresolved follow-up
+  including a dropped history ticker/year (`unresolved_follow_up`), lowercase ticker word
+  with no ticker chosen (`ambiguous_entity_mention`), ambiguous binding, unknown semantic
+  review). No retrieval happens.
+- `invalid`: malformed or inconsistent model output (including adapter parse failures and
+  unsupported document types: `invented_document_type`, `missing_document_type`), or a
+  failed semantic review.
 - `unavailable`: LLM or reviewer raised one of the configured provider errors
   (default `TimeoutError`, `ConnectionError`); only the exception class name is kept.
 
@@ -100,7 +125,10 @@ Any non-valid result gives `retrieval_status="not_run"` and zero retriever calls
 Retrieval failures: exceptions that are instances of `retrieval_errors` (default
 `TimeoutError`, `ConnectionError`, `OSError`) are recorded per pass as the class name only
 (never `str(exc)`), and other groups continue. Any other exception (`ValueError`,
-`KeyError`, `TypeError`, ...) propagates as a programming/contract error.
+`KeyError`, `TypeError`, ...) propagates as a programming/contract error. Transport errors
+that do not subclass the builtin defaults (for example from `httpx`, `chromadb` or `redis`)
+must be added to `retrieval_errors` (retriever) or `provider_errors` (LLM/reviewer);
+otherwise they abort the whole request.
 
 ## Retrieval policy and passes
 
@@ -141,6 +169,13 @@ not downgrade the status.
   not an error.
 - The validator is strict and asks for clarification in doubtful cases, e.g. a single year
   placed between two companies.
+- Metrics outside the catalog are not recognized: a question about such a metric may keep
+  `metric` null (only `metric_text` is checked when the model sets it).
+- Trade names absent from `data/code_stock.csv` and from injected aliases (e.g. "Vinamilk")
+  are not recognized; a plan that leaves `ticker` null for them retrieves without a ticker
+  restriction. Inject aliases to cover them.
+- History fields are validated (shape, length) for every supplied turn before the history is
+  trimmed to `max_history_turns`, so an invalid old turn raises `ValueError`.
 - Worst case is sequential: `max_subqueries` x up to 3 hybrid + rerank calls per plan
   (default 8 x 3 = 24), with no parallelism or caching.
 - Not tested: any live LLM provider, strict structured-output compatibility of the

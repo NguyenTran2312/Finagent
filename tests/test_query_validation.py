@@ -422,10 +422,11 @@ class EntityTests(ValidationTestCase):
 
     def test_lowercase_ticker_words_support_but_never_force(self):
         question = "doanh thu gas năm 2023"
-        for ticker in (None, "GAS"):
-            with self.subTest(ticker=ticker):
-                self.assertValid(run(plan(question, sq(ticker=ticker, year=2023,
-                                                       metric="revenue")), question))
+        self.assertValid(run(plan(question, sq(ticker="GAS", year=2023, metric="revenue")),
+                             question))
+        # Final-review ruling: a ticker-word mention with no subquery ticker is ambiguous.
+        self.assertClarify(run(plan(question, sq(year=2023, metric="revenue")), question),
+                           "ambiguous_entity_mention")
         deficit = "Thâm hụt ngân sách năm 2023?"
         self.assertValid(run(plan(deficit, sq(year=2023, metric_text="thâm hụt ngân sách")),
                              deficit))
@@ -641,6 +642,58 @@ class ReviewFixRoundOneTests(ValidationTestCase):
         self.assertInvalid(run(plan(question, sq(unit="triệu đồng", **fields)), question),
                            "invented_unit")
         self.assertInvalid(run(plan(question, sq(**fields)), question), "missing_unit")
+
+
+class FinalReviewFixTests(ValidationTestCase):
+    """Regressions for the final whole-branch review."""
+    HISTORY = [QATurn(question="Doanh thu VJC năm 2022 là bao nhiêu?")]
+
+    def test_follow_up_dropping_history_ticker_or_year_needs_clarification(self):
+        cases = [("Còn năm 2023 thì sao?", dict(year=2023, metric="revenue", refs={"metric": 0})),
+                 ("Còn lợi nhuận sau thuế năm 2023?", dict(year=2023, metric="profit_after_tax")),
+                 ("Còn HPG thì sao?", dict(ticker="HPG", metric="revenue", refs={"metric": 0}))]
+        for question, fields in cases:
+            with self.subTest(question=question):
+                self.assertClarify(run(plan(question, sq(**fields)), question, self.HISTORY),
+                                   "unresolved_follow_up")
+
+    def test_follow_up_with_inherited_ticker_or_year_stays_valid(self):
+        cases = [("Còn năm 2023 thì sao?", dict(ticker="VJC", year=2023, metric="revenue",
+                                                refs={"ticker": 0, "metric": 0})),
+                 ("Còn lợi nhuận sau thuế năm 2023?",
+                  dict(ticker="VJC", year=2023, metric="profit_after_tax", refs={"ticker": 0})),
+                 ("Còn HPG thì sao?", dict(ticker="HPG", year=2022, metric="revenue",
+                                           refs={"year": 0, "metric": 0}))]
+        for question, fields in cases:
+            with self.subTest(question=question):
+                self.assertValid(run(plan(question, sq(**fields)), question, self.HISTORY))
+
+    def test_lowercase_ticker_mention_without_subquery_ticker_needs_clarification(self):
+        question = "doanh thu vjc năm 2023"
+        self.assertClarify(run(plan(question, sq(year=2023, metric="revenue")), question),
+                           "ambiguous_entity_mention")
+        self.assertValid(run(plan(question, sq(ticker="VJC", year=2023, metric="revenue")),
+                             question))
+
+    def test_document_types_need_question_cues(self):
+        def with_types(question, types):
+            subquery = dict(sq(ticker="VJC", year=2023, metric="revenue"), document_types=types)
+            return run(plan(question, subquery), question)
+
+        for types in (["letters"], ["explanations"], ["financial_statements", "letters"]):
+            with self.subTest(types=types):
+                result = with_types(Q_VJC, types)
+                self.assertInvalid(result, "invented_document_type")
+                self.assertIn("q1", {i.subquery_id for i in result.issues
+                                     if i.code == "invented_document_type"})
+        self.assertValid(with_types(Q_VJC, ["financial_statements"]))
+        notes = "Thuyết minh doanh thu VJC năm 2023"
+        self.assertValid(with_types(notes, ["explanations"]))
+        self.assertInvalid(with_types(notes, []), "missing_document_type")
+        letters = "Thư giải trình doanh thu VJC năm 2023"
+        self.assertValid(with_types(letters, ["letters"]))
+        self.assertInvalid(with_types(letters, ["explanations"]),
+                           "invented_document_type", "missing_document_type")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ Only a ``valid`` ParaphraseResult may reach retrieval. There is no retry, repair
 fallback: provider failures (an explicit exception tuple) become ``unavailable`` with a
 sanitized message; every other exception from the LLM or reviewer propagates unchanged.
 """
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from pydantic import BaseModel, ValidationError
 
@@ -84,7 +84,9 @@ class QueryParaphraser:
                 result: ParaphraseResult):
         """Call the reviewer with (original_index, QATurn) pairs, the indexes context_refs use."""
         try:
-            raw = self._reviewer(question=question, qa_history=history, plan=result.plan)
+            # A deep copy, so reviewer mutation can never reach the plan used for retrieval.
+            raw = self._reviewer(question=question, qa_history=history,
+                                 plan=result.plan.model_copy(deep=True))
         except self._provider_errors as error:
             return _unavailable("semantic_reviewer_unavailable", error, "semantic reviewer",
                                 "unknown")
@@ -109,13 +111,22 @@ class QueryParaphraser:
 def structured_llm_adapter(client) -> Callable[[str], object]:
     """Adapt a LangChain-style chat model to the ``llm(prompt)`` callable.
 
-    Calls ``client.with_structured_output(QueryPlan)`` once, here; nothing from langchain
-    is imported. The returned model is still re-validated by validate_plan. Provider
-    strict-mode compatibility of the QueryPlan schema is NOT verified against any live
-    provider; only that QueryPlan.model_json_schema() builds is tested.
+    Calls ``client.with_structured_output(QueryPlan, include_raw=True)`` once, here; nothing
+    from langchain is imported. Each call returns ``parsed`` only when ``parsing_error`` is
+    None and ``parsed`` is set; otherwise it returns None, which validate_plan reports as
+    ``invalid`` (unsupported_output). The raw model text is never returned. The parsed
+    model is still re-validated by validate_plan. Provider strict-mode compatibility of the
+    QueryPlan schema is NOT verified against any live provider; only that
+    QueryPlan.model_json_schema() builds is tested.
     """
     binder = getattr(client, "with_structured_output", None)
     if not callable(binder):
         raise TypeError("client must provide with_structured_output")
-    structured = binder(QueryPlan)
-    return lambda prompt: structured.invoke(prompt)
+    structured = binder(QueryPlan, include_raw=True)
+
+    def invoke(prompt):
+        response = structured.invoke(prompt)
+        if not isinstance(response, Mapping) or response.get("parsing_error") is not None:
+            return None
+        return response.get("parsed")
+    return invoke

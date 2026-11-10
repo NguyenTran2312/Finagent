@@ -282,6 +282,18 @@ class SemanticReviewTests(unittest.TestCase):
         self.assertNotIn("secret", result.model_dump_json())
         self.assertEqual(len(llm.prompts), 1)
 
+    def test_reviewer_mutation_does_not_reach_result_plan(self):
+        def reviewer(*, question, qa_history, plan):
+            plan.subqueries[0].ticker = "HPG"
+            plan.subqueries[0].context_refs.clear()
+            plan.subqueries.append(plan.subqueries[0])
+            return {"status": "passed", "reason": "Đúng ý."}
+
+        result = paraphraser(FakeLLM(FOLLOW), semantic_reviewer=reviewer).paraphrase(
+            Q_FOLLOW, [PREVIOUS])
+        self.assertEqual((result.status, result.semantic_status), ("valid", "passed"))
+        self.assertEqual(result.plan, QueryPlan.model_validate(FOLLOW))
+
     def test_other_reviewer_errors_propagate(self):
         with self.assertRaises(RuntimeError):
             self.run_review(error=RuntimeError("bug"))
@@ -314,26 +326,48 @@ class FakeClient:
     def __init__(self, response):
         self.structured, self.schemas = FakeStructured(response), []
 
-    def with_structured_output(self, schema):
-        self.schemas.append(schema)
+    def with_structured_output(self, schema, **kwargs):
+        self.schemas.append((schema, kwargs))
         return self.structured
+
+
+def raw_response(parsed, parsing_error=None, raw=SECRET):
+    """Shape of with_structured_output(..., include_raw=True) results."""
+    return {"raw": raw, "parsed": parsed, "parsing_error": parsing_error}
 
 
 class AdapterTests(unittest.TestCase):
     def test_adapter_binds_once_invokes_client_and_still_validates(self):
-        client = FakeClient(QueryPlan.model_validate(SIMPLE))
+        client = FakeClient(raw_response(QueryPlan.model_validate(SIMPLE)))
         llm = structured_llm_adapter(client)
-        self.assertEqual(client.schemas, [QueryPlan])
+        self.assertEqual(client.schemas, [(QueryPlan, {"include_raw": True})])
         result = paraphraser(llm).paraphrase(Q_VJC)
         self.assertEqual(result.status, "valid")
-        self.assertEqual(client.schemas, [QueryPlan])
+        self.assertEqual(result.plan, QueryPlan.model_validate(SIMPLE))
+        self.assertEqual(client.schemas, [(QueryPlan, {"include_raw": True})])
         self.assertEqual(len(client.structured.invoked), 1)
         self.assertIn(Q_VJC, client.structured.invoked[0])
 
     def test_adapter_output_is_revalidated_locally(self):
         bad = QueryPlan.model_validate(plan(Q_VJC, sq(ticker="HPG", year=2023, metric="revenue")))
-        result = paraphraser(structured_llm_adapter(FakeClient(bad))).paraphrase(Q_VJC)
+        result = paraphraser(structured_llm_adapter(FakeClient(raw_response(bad)))).paraphrase(
+            Q_VJC)
         self.assertEqual(result.status, "invalid")
+        self.assertIn("invented_ticker", {issue.code for issue in result.issues})
+
+    def test_adapter_parse_failures_are_invalid_without_raw_text(self):
+        good = QueryPlan.model_validate(SIMPLE)
+        for response in (raw_response(None, ValueError(SECRET)),
+                         raw_response(good, ValueError(SECRET)), raw_response(None)):
+            with self.subTest(response=response["parsing_error"]):
+                result = paraphraser(structured_llm_adapter(FakeClient(response))).paraphrase(
+                    Q_VJC)
+                self.assertEqual(result.status, "invalid")
+                self.assertIsNone(result.plan)
+                self.assertEqual([issue.code for issue in result.issues], ["unsupported_output"])
+                dumped = result.model_dump_json()
+                self.assertNotIn("secret", dumped)
+                self.assertNotIn("internal.example", dumped)
 
     def test_adapter_requires_structured_output_support(self):
         with self.assertRaises(TypeError):

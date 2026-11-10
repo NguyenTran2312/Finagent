@@ -2,8 +2,9 @@
 
 A ``valid`` result only means the plan passed the code checks below: strict schema and
 limits, explicit question constraints (registry tickers, years from refine_question,
-catalog metrics, scope, period, unit and operation keywords), ticker/year pairs when the
-question layout makes them verifiable, and history provenance. It is not proof of
+catalog metrics, scope, period, unit, operation and document-type keywords), ticker/year
+pairs when the question layout makes them verifiable, and history provenance (a follow-up
+may not leave null a ticker/year that a retained history question states). It is not proof of
 semantic correctness, so semantic_status stays "not_run". The phrase lists are small on
 purpose; wording outside them is not recognized and is left to the optional reviewer.
 """
@@ -72,6 +73,9 @@ _FOLLOW_UP = re.compile(r"^\W*còn(?!\w)|"
 _METRIC_REFERENCE = re.compile(_words("chỉ tiêu (?:đó|này)"))
 _FILLER = frozenset("con nam cua la bao nhieu thi sao the nao va ve voi o trong cho".split())
 _YEAR = re.compile(r"\b(?:19|20|21)\d{2}\b")
+# Folded cues that justify each non-primary document type; financial_statements needs none.
+_DOCUMENT_CUES = {"explanations": re.compile(r"\bthuyet minh\b"),
+                  "letters": re.compile(r"\bthu giai trinh\b")}
 
 
 def _years_in(text: str) -> set[int]:
@@ -182,6 +186,12 @@ def _mask_weak_tickers(text: str, registry: EntityRegistry) -> str:
         ticker = fold_text(word).upper()
         return " " if word != ticker and registry.company_name(ticker) else word
     return re.sub(r"\w+", keep, text)
+
+
+def _ticker_words(text: str, registry: EntityRegistry) -> set[str]:
+    """Tickers written as a whole word in another case ("vjc", "Gas"); "hụt" is not HUT."""
+    return {word.upper() for word in re.findall(r"\w+", _nfc(text))
+            if word != word.upper() and registry.company_name(word.upper())}
 
 
 def _facts(text: str, registry: EntityRegistry) -> dict[str, set]:
@@ -309,9 +319,20 @@ def _subquery_issues(plan, question, facts, history, registry):
             resolving & sq.context_refs.keys() for sq in plan.subqueries):
         issues.append(_issue(CLARIFY, "unresolved_follow_up", "follow-up question names no "
                              "company or metric and none is inherited from history"))
+    stated_before = {"ticker": set(), "year": set()}
+    if follow_up:
+        for index in history:
+            turn_facts[index] = _facts(history[index].question, registry)
+            for key in stated_before:
+                stated_before[key] |= turn_facts[index][key]
     for sq in plan.subqueries:
         def add(severity, code, message, sid=sq.id):
             issues.append(_issue(severity, code, message, sid))
+        # A follow-up must not silently drop a company/year its history depends on.
+        for key in stated_before:
+            if stated_before[key] and not facts[key] and getattr(sq, key) is None:
+                add(CLARIFY, "unresolved_follow_up", f"follow-up leaves {key} null although "
+                    "the history states one; it is neither stated nor inherited")
         values, sources = _values(sq), {}
         present = {f: getattr(sq, f) is not None for f in ("ticker", "company_name", "year",
                                                               "scope", "period", "unit")}
@@ -431,6 +452,28 @@ def _coverage_issues(plan: QueryPlan, facts, pairs):
     return issues
 
 
+def _mention_issues(plan: QueryPlan, question: str, registry: EntityRegistry):
+    """A ticker written in another case ("vjc") must not silently leave every ticker null."""
+    words = _ticker_words(question, registry)
+    if words and not any(sq.ticker for sq in plan.subqueries):
+        return [_issue(CLARIFY, "ambiguous_entity_mention", f"{', '.join(sorted(words))} "
+                       "may name a company but no subquery has a ticker")]
+    return []
+
+
+def _document_type_issues(plan: QueryPlan, question: str):
+    folded = fold_text(question)
+    cued = {kind for kind, pattern in _DOCUMENT_CUES.items() if pattern.search(folded)}
+    issues = [_issue(INVALID, "invented_document_type",
+                     f"{kind} is requested but the question does not ask for it", sq.id)
+              for sq in plan.subqueries
+              for kind in sorted((set(sq.document_types) & _DOCUMENT_CUES.keys()) - cued)]
+    requested = {kind for sq in plan.subqueries for kind in sq.document_types}
+    return issues + [_issue(INVALID, "missing_document_type",
+                            f"question asks for {kind} but no subquery requests it")
+                     for kind in sorted(cued - requested)]
+
+
 def _operation_issues(plan: QueryPlan, question: str):
     intents = _labels(_NOT_OPERATIONS.sub(" ", _norm(question)), _OPERATIONS)
     issues = []
@@ -465,5 +508,6 @@ def validate_plan(raw, question: str, qa_history: list[QATurn] | None = None, *,
     if issues:
         return _result(issues)
     issues = (_subquery_issues(plan, question, facts, history, registry)
-              + _coverage_issues(plan, facts, pairs) + _operation_issues(plan, question))
+              + _coverage_issues(plan, facts, pairs) + _operation_issues(plan, question)
+              + _mention_issues(plan, question, registry) + _document_type_issues(plan, question))
     return _result(issues, plan)
