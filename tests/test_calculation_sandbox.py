@@ -18,7 +18,7 @@ from src.calculation.sandbox import (
     check_code,
     run,
 )
-from tests.test_calculation_helpers import M, VJC_2023, context, make_tree
+from tests.test_calculation_helpers import M, VJC_2023, context, fact, make_tree
 
 ESCAPES = {
  "import": "import os\ndef solution(): return 1",
@@ -182,10 +182,44 @@ class CheckCodeTests(unittest.TestCase):
             with self.subTest(code):
                 self.assertTrue(check_code(code))
 
+    def test_string_constants_allowed_as_plain_values(self):
+        # R14: strings are ordinary values; only f-strings / t-strings stay forbidden.
+        for code in ("def solution():\n    ts = ['VJC', 'HPG']\n    return ts",
+                     "def solution():\n    d = dict(VJC=1)\n    return d['VJC']",
+                     "def solution():\n    t = 'VJC'\n    return t == 'VJC'",
+                     "def solution(): return answer('VJC' if c else 'HPG', 'ticker')",
+                     "def solution(): return {'VJC': ('a', 'b')}",
+                     "def solution():\n    '''docstrings are plain string values'''\n    return 1"):
+            with self.subTest(code):
+                self.assertEqual(check_code(code), [])
+        self.assertIn("JoinedStr", rejected_nodes("def solution(): return f'{x}'"))
+        self.assertTrue(check_code("def solution(): return t'{x}'"))
+
+    def test_code_length_bound(self):
+        code = "def solution(): return 1" + " " * (20_001 - 24)
+        self.assertEqual(len(code), 20_001)
+        started = time.monotonic()
+        self.assertEqual(check_code(code), [SyntaxRejected(0, "Module",
+                                                           "code too long (max 20000 characters)")])
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual(run(code, make_tree(), FactSet(()), context()).kind, "rejected")
+
+    def test_many_literals_checked_in_linear_time(self):
+        code = ("def solution():\n    xs = [" + ", ".join(["1.5"] * 2000)
+                + "]\n    return answer(len(xs), 'count')")
+        self.assertLess(len(code), 20_000)
+        started = time.monotonic()
+        self.assertEqual(check_code(code), [])
+        sandbox._rewrite_literals(code)
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_literal_text_uses_utf8_columns(self):
+        code = "def solution():\n    return f('đồng tỷ', 0.1, 'ữ', 2.50)\r\n# x\n"
+        text = ast.unparse(sandbox._rewrite_literals(code))
+        self.assertIn("_num('0.1')", text)
+        self.assertIn("_num('2.50')", text)
+
     def test_literals(self):
-        self.assertTrue(check_code("def solution(): return 'x'"))
-        self.assertTrue(check_code("def solution():\n    '''doc'''\n    return 1"))
-        self.assertTrue(check_code("def solution(): return ['VJC']"))
         self.assertTrue(check_code("def solution(): return 1j"))
         self.assertTrue(check_code("def solution(): return 0x10"))
         self.assertTrue(check_code("def solution(): return b'x'"))
@@ -216,6 +250,30 @@ class CheckCodeTests(unittest.TestCase):
         self.assertIn("_num('1_0')", text)
         self.assertIn("True", text)
         self.assertEqual(sandbox._num("0.1"), D("0.1"))
+
+    def test_subscripts_wrapped_in_index(self):
+        code = "def solution():\n    xs[0] = xs[len(xs) - 1] + xs[1:-1:2][0] + d['VJC'] + xs[:]"
+        text = ast.unparse(sandbox._rewrite_literals(code))
+        self.assertIn("xs[_index(_num('0'))] =", text)
+        self.assertIn("xs[_index(len(xs) - _num('1'))]", text)
+        self.assertIn("xs[_index(_num('1')):_index(-_num('1')):_index(_num('2'))]", text)
+        self.assertIn("d[_index('VJC')]", text)
+        self.assertIn("xs[:]", text)
+
+    def test_index_conversion(self):
+        self.assertEqual(sandbox._index(D("2")), 2)
+        self.assertIsInstance(sandbox._index(D("2.0")), int)
+        self.assertEqual(sandbox._index(D("-1")), -1)
+        for value in ("VJC", D("0.5"), D("1E+40"), 3, True, None):
+            with self.subTest(value):
+                self.assertIs(sandbox._index(value), value)
+        self.assertEqual({2023: "a"}[sandbox._index(D(2023))], "a")
+        self.assertEqual({D(2023): "a"}[sandbox._index(D(2023))], "a")
+        with self.assertRaises(TypeError):
+            [1, 2][sandbox._index(D("0.5"))]
+        self.assertEqual(list(sandbox._enumerate(["a"], D(1))), [(1, "a")])
+        with self.assertRaises(TypeError):
+            sandbox._enumerate(["a"], D("1.5"))
 
     def test_run_validates_timeouts(self):
         with self.assertRaises(ValueError):
@@ -305,6 +363,56 @@ class SandboxRunTests(unittest.TestCase):
     def test_child_dying_before_start_is_startup_failure(self):
         result = run("def solution(): return 1", make_tree(), _ExitOnUnpickle(), context())
         self.assertFailure(result, "runtime_error", "StartupFailure")
+
+    def test_setup_error_names_class(self):
+        # `break` outside a loop passes the AST check but fails to compile in the child
+        result = self.run_code("def solution():\n    break")
+        self.assertFailure(result, "runtime_error", "StartupFailure:SyntaxError")
+
+    def test_unlisted_builtin_is_name_error(self):
+        result = self.run_code("def solution():\n    x = getattr\n    return x")
+        self.assertFailure(result, "runtime_error", "NameError")
+
+    def test_indexing_slicing_and_enumerate_start(self):
+        code = ("def solution():\n"
+                "    xs = sorted([percent(30), percent(10), percent(20)])\n"
+                "    first = sorted(xs)[0]\n"
+                "    last = xs[len(xs) - 1]\n"
+                "    assert_last = xs[-1]\n"
+                "    total = percent(0)\n"
+                "    for i, x in enumerate(xs[0:2], 1):\n"
+                "        total = total + x * i\n"
+                "    return answer(total + last - first + assert_last - last, 'percent')")
+        result = self.run_code(code)
+        self.assertIsInstance(result, ExecutionResult)
+        # 0.10*1 + 0.20*2 + 0.30 - 0.10 = 0.70
+        self.assertEqual(result.answer.value.value, D("0.70"))
+
+    def test_valid_program_runs(self):
+        facts = [fact(m, v, ticker=t, year=y)
+                 for t in ("VJC", "HPG") for y in (2021, 2022, 2023)
+                 for m, v in (("profit_before_tax", 100 + y), ("interest_expense", -50))]
+        result = self.run_code(VALID, facts)
+        self.assertIsInstance(result, ExecutionResult)
+        # n = 3 -> 1.5 * 0.10 - 0.1 / 2 + max(3, -3) - min(1, 2) = 2.10
+        self.assertEqual(result.answer.unit, "percent")
+        self.assertEqual(result.answer.value.value, D("2.10"))
+
+    def test_ticker_list_argmax(self):
+        facts = [fact("profit_before_tax", 100, ticker="VJC"),
+                 fact("interest_expense", -50, ticker="VJC"),
+                 fact("profit_before_tax", 900, ticker="HPG"),
+                 fact("interest_expense", -50, ticker="HPG")]
+        code = ("def solution():\n"
+                "    ts = ['VJC', 'HPG']\n"
+                "    m = {}\n"
+                "    for t in ts:\n"
+                "        m[t] = metric('ebit', t, 2023)\n"
+                "    best = 'VJC' if m['VJC'] > m['HPG'] else argmax(m)\n"
+                "    return answer(argmax(m) if best == 'HPG' else 'none', 'ticker')")
+        result = self.run_code(code, facts)
+        self.assertIsInstance(result, ExecutionResult)
+        self.assertEqual((result.answer.kind, result.answer.value), ("ticker", "HPG"))
 
     def test_startup_timeout_is_startup_failure(self):
         result = self.run_code("def solution(): return 1", startup_timeout=0.01)

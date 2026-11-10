@@ -9,11 +9,19 @@ The code is untrusted. Defence layers:
    closures whose `__closure__` reaches the FactSet and Trace, so forbidding every
    `Attribute` node is what keeps generated code away from those internals.
 2. Every numeric literal is rewritten to `_num("<source text>")`, i.e. an exact `Decimal` (D3).
+   Subscript indices and slice bounds are wrapped in `_index(...)`, which turns an integral
+   Decimal into an int so `xs[0]` / `xs[1:3]` work (R13); `range` and `enumerate` accept
+   integral Decimals the same way.
 3. The code runs in a fresh `multiprocessing` "spawn" process whose `__builtins__` holds only
    `ALLOWED_BUILTINS`, so `__import__`, `open`, `getattr` etc. do not exist at runtime either.
 
+The AST whitelist is the only real barrier. The child process is NOT isolated at the OS level
+(same user, filesystem and network access as the parent) and on Windows has no memory cap;
+restricted builtins and the separate process are a second line of defence, not a jail.
+
 Child protocol (D7): the child sends ("started",) right before calling `solution()`, then
-("ok", answer, trace) or ("error", kind, class_name). The parent allows `startup_timeout` for
+("ok", answer, trace) or ("error", kind, class_name); a failure while setting up sends
+("startup_error", class_name) instead of "started". The parent allows `startup_timeout` for
 the spawn and `timeout` for `solution()` itself; on expiry the child is terminated, then
 killed. Exception text never leaves the child: failures carry the exception class name only.
 
@@ -34,6 +42,7 @@ import builtins
 import math
 import multiprocessing
 import pickle
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from multiprocessing import connection as mp_connection
@@ -50,6 +59,7 @@ HELPER_NAMES = frozenset({
     "fact", "metric", "avg_balance", "growth_pct", "cagr", "pct_point_change", "mean", "median",
     "argmax", "argmin", "filter_by", "count_if", "money", "percent", "answer",
 })
+MAX_CODE_CHARS = 20_000
 MAX_TRACE_STEPS = 10_000
 MAX_RESULT_BYTES = 16 * 1024 * 1024
 MEMORY_LIMIT_BYTES = 2 * 1024 ** 3  # POSIX only
@@ -130,21 +140,48 @@ def _bad_identifier(name: str) -> bool:
     return name.startswith("_") or "__" in name
 
 
+class _SourceLines:
+    """Source text of single-line nodes in linear total time (R15).
+
+    `ast.get_source_segment` re-splits the whole source on every call, which is quadratic over
+    many literals. Lines are split once (on the same line breaks as the tokenizer) and each is
+    encoded lazily, because AST column offsets are UTF-8 byte offsets.
+    """
+
+    def __init__(self, code: str):
+        parts = re.split(r"(\r\n|\r|\n)", code)
+        self._lines = parts[::2]
+        self._encoded: dict[int, bytes] = {}
+
+    def segment(self, node: ast.expr) -> str | None:
+        end_line, end_col = getattr(node, "end_lineno", None), getattr(node, "end_col_offset", None)
+        index = node.lineno - 1
+        if end_line != node.lineno or end_col is None or not 0 <= index < len(self._lines):
+            return None
+        line = self._encoded.get(index)
+        if line is None:
+            line = self._encoded[index] = self._lines[index].encode("utf-8")
+        try:
+            return line[node.col_offset:end_col].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+
+
 class _Checker:
     def __init__(self, code: str):
-        self.code = code
+        self.source = _SourceLines(code)
         self.issues: list[SyntaxRejected] = []
 
-    def visit(self, node: ast.AST, parent: ast.AST, line: int) -> None:
+    def visit(self, node: ast.AST, line: int) -> None:
         line = getattr(node, "lineno", line)
-        reason = self._problem(node, parent)
+        reason = self._problem(node)
         if reason is not None:
             self.issues.append(SyntaxRejected(line, type(node).__name__, reason))
             return  # one rejection per offending subtree
         for child in ast.iter_child_nodes(node):
-            self.visit(child, node, line)
+            self.visit(child, line)
 
-    def _problem(self, node: ast.AST, parent: ast.AST) -> str | None:
+    def _problem(self, node: ast.AST) -> str | None:
         reason = _FORBIDDEN_REASONS.get(type(node))
         if reason is not None:
             return reason
@@ -170,25 +207,21 @@ class _Checker:
             if node.is_async:
                 return "async comprehensions are forbidden"
         elif isinstance(node, ast.Constant):
-            return self._constant_problem(node, parent)
+            return self._constant_problem(node)
         return None
 
-    def _constant_problem(self, node: ast.Constant, parent: ast.AST) -> str | None:
+    def _constant_problem(self, node: ast.Constant) -> str | None:
         value = node.value
-        if value is None or isinstance(value, bool):
+        if value is None or isinstance(value, (bool, str)):  # strings are plain values (R14)
             return None
         if isinstance(value, (int, float)):
-            text = ast.get_source_segment(self.code, node)
+            text = self.source.segment(node)
             try:
                 if text is None or not Decimal(text).is_finite():
                     raise InvalidOperation
             except InvalidOperation:
                 return "numeric literals must be plain decimal numbers"
             return None
-        if isinstance(value, str):
-            is_argument = (isinstance(parent, ast.keyword)
-                           or (isinstance(parent, ast.Call) and node in parent.args))
-            return None if is_argument else "string constants are allowed only as call arguments"
         return f"{type(value).__name__} literals are forbidden"
 
 
@@ -210,6 +243,8 @@ def check_code(code: str) -> list[SyntaxRejected]:
     """Every whitelist violation in `code`; an empty list means the code may run."""
     if not isinstance(code, str):
         raise TypeError(f"code must be a str, got {type(code).__name__}")
+    if len(code) > MAX_CODE_CHARS:
+        return [SyntaxRejected(0, "Module", f"code too long (max {MAX_CODE_CHARS} characters)")]
     try:
         module = ast.parse(code, "<solution>", "exec")
     except SyntaxError as exc:
@@ -232,7 +267,7 @@ def check_code(code: str) -> list[SyntaxRejected]:
     checker = _Checker(code)
     try:
         for statement in solution.body:
-            checker.visit(statement, solution, solution.lineno)
+            checker.visit(statement, solution.lineno)
     except RecursionError:
         checker.issues.append(SyntaxRejected(solution.lineno, "Module", "code is nested too deeply"))
     return issues + checker.issues
@@ -244,44 +279,85 @@ def _num(text: str) -> Decimal:
     return Decimal(text)
 
 
+def _call(name: str, arg: ast.expr) -> ast.Call:
+    return ast.copy_location(ast.Call(ast.Name(name, ast.Load()), [arg], []), arg)
+
+
 class _LiteralRewriter(ast.NodeTransformer):
+    """Numeric literals -> `_num("<source text>")` (D3); indices and slice bounds -> `_index(...)` (R13)."""
+
     def __init__(self, code: str):
-        self.code = code
+        self.source = _SourceLines(code)
 
     def visit_Constant(self, node: ast.Constant) -> ast.AST:
         if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
             return node
-        text = ast.get_source_segment(self.code, node)
+        text = self.source.segment(node)
         if text is None:
             raise ValueError("numeric literal without source position")
-        call = ast.Call(ast.Name("_num", ast.Load()), [ast.Constant(text)], [])
-        return ast.copy_location(call, node)
+        return ast.copy_location(ast.Call(ast.Name("_num", ast.Load()), [ast.Constant(text)], []),
+                                 node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        self.generic_visit(node)  # rewrites literals; Slice bounds are wrapped by visit_Slice
+        index = node.slice
+        if isinstance(index, ast.Tuple) and any(isinstance(e, ast.Slice) for e in index.elts):
+            index.elts = [e if isinstance(e, ast.Slice) else _call("_index", e) for e in index.elts]
+        elif not isinstance(index, ast.Slice):
+            node.slice = _call("_index", index)
+        return node
+
+    def visit_Slice(self, node: ast.Slice) -> ast.AST:
+        self.generic_visit(node)
+        for name in ("lower", "upper", "step"):
+            bound = getattr(node, name)
+            if bound is not None:
+                setattr(node, name, _call("_index", bound))
+        return node
 
 
 def _rewrite_literals(code: str) -> ast.Module:
-    """Parse `code` and replace every numeric literal by `_num("<source text>")`."""
+    """Parse `code`, rewrite numeric literals to `_num(...)` and wrap indices in `_index(...)`."""
     module = _LiteralRewriter(code).visit(ast.parse(code, "<solution>", "exec"))
     return ast.fix_missing_locations(module)
 
 
-def _range_bound(value: object) -> object:
-    """Integral Decimal literals (D3) become ints so `range(2019, 2024)` works."""
+def _int_argument(value: object, what: str) -> object:
+    """An integral Decimal (D3 literal) as int; other Decimals raise, non-Decimals pass through."""
     if isinstance(value, Decimal):
         if not value.is_finite() or value != value.to_integral_value():
-            raise TypeError("range() needs integers")
-        if value.adjusted() > 18:
-            raise OverflowError("range() bound too large")
+            raise TypeError(f"{what} needs integers")
+        if not value.is_zero() and value.adjusted() > 18:
+            raise OverflowError(f"{what} value too large")
         return int(value)
     return value
 
 
+def _index(value: object) -> object:
+    """Subscript key: an integral Decimal becomes an int (R13); anything else is unchanged.
+
+    Non-integral or huge Decimals stay Decimal, so a list raises TypeError while a dict still
+    finds a Decimal key. int(Decimal(2023)) hashes like Decimal(2023), so dict lookups by year
+    work either way.
+    """
+    try:
+        return _int_argument(value, "index")
+    except (TypeError, OverflowError):
+        return value
+
+
 def _range(*args: object) -> range:
-    return range(*(_range_bound(a) for a in args))
+    return range(*(_int_argument(a, "range()") for a in args))
+
+
+def _enumerate(iterable: object, start: object = 0) -> enumerate:
+    return enumerate(iterable, _int_argument(start, "enumerate()"))
 
 
 def _restricted_builtins() -> dict[str, object]:
     allowed = {name: getattr(builtins, name) for name in ALLOWED_BUILTINS}
     allowed["range"] = _range
+    allowed["enumerate"] = _enumerate
     return allowed
 
 
@@ -328,10 +404,11 @@ def _child_main(conn, code: str, tree: MetricTree, facts: FactSet,
             _limit_memory()
             trace = Trace()
             env = {"__builtins__": _restricted_builtins(),
-                   **build_helpers(tree, facts, context, trace), "_num": _num}
+                   **build_helpers(tree, facts, context, trace), "_num": _num, "_index": _index}
             exec(compile(_rewrite_literals(code), "<solution>", "exec", dont_inherit=True), env)
             solution = env["solution"]
-        except BaseException:  # noqa: BLE001 - parent reports StartupFailure
+        except BaseException as exc:  # noqa: BLE001 - only the class name leaves the child
+            conn.send_bytes(pickle.dumps(("startup_error", type(exc).__name__)))
             return
         conn.send_bytes(pickle.dumps(("started",)))
         conn.send_bytes(_encode(_execute(solution, trace)))
@@ -420,7 +497,11 @@ def run(code: str, tree: MetricTree, facts: FactSet, context: ExecutionContext, 
         process.start()
         started = True
         writer.close()  # the child holds its own copy; EOF must reach us if it dies
-        if _receive(reader, process, startup_timeout) != ("started",):
+        greeting = _receive(reader, process, startup_timeout)
+        if greeting != ("started",):
+            if (isinstance(greeting, tuple) and len(greeting) == 2
+                    and greeting[0] == "startup_error" and isinstance(greeting[1], str)):
+                return ExecutionFailure("runtime_error", f"StartupFailure:{greeting[1]}")
             return ExecutionFailure("runtime_error", "StartupFailure")
         message = _receive(reader, process, timeout)
         finished = message is not _TIMED_OUT

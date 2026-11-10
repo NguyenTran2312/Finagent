@@ -150,8 +150,12 @@ class Quantity:
         return o
 
     def __eq__(self, other):
-        # Quantity vs Quantity keeps dataclass equality (same value and dimension). A bare
-        # number follows the ordering rules (R10) instead of silently comparing unequal.
+        """Quantity vs Quantity: same value and dimension. A bare number follows the ordering
+        rules (R10) instead of silently comparing unequal.
+
+        Mixing Quantity and bare-number keys in one dict or set is unsupported: `M(0) == 0`
+        is True but their hashes differ.
+        """
         if other.__class__ is self.__class__:
             return (self.value, self.dimension) == (other.value, other.dimension)
         o = self._comparable(other)
