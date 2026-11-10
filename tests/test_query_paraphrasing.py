@@ -235,9 +235,26 @@ class SemanticReviewTests(unittest.TestCase):
                 self.assertEqual(len(llm.prompts), 1)
                 call, = reviewer.calls
                 self.assertEqual(call["question"], Q_FOLLOW)
-                self.assertEqual(call["qa_history"], [QATurn(**PREVIOUS)])
+                self.assertEqual(call["qa_history"], [(0, QATurn(**PREVIOUS))])
                 self.assertEqual(call["plan"], result.plan)
                 self.assertIsInstance(call["plan"], QueryPlan)
+
+    def test_reviewer_receives_original_indexes_for_long_history(self):
+        history = [{"question": f"LNST HPG năm {2010 + i}?"} for i in range(8)]
+        history[7] = PREVIOUS
+        refs = {"ticker": 7, "metric": 7}
+        llm = FakeLLM(plan(Q_FOLLOW, sq(ticker="VJC", year=2023, metric="revenue", refs=refs)))
+        reviewer = FakeReviewer({"status": "passed", "reason": "Đúng ý."})
+        result = paraphraser(llm, semantic_reviewer=reviewer).paraphrase(Q_FOLLOW, history)
+        self.assertEqual(result.semantic_status, "passed")
+        call, = reviewer.calls
+        pairs = call["qa_history"]
+        self.assertEqual(pairs[0][0], len(history) - 5)
+        self.assertEqual([index for index, _ in pairs], [3, 4, 5, 6, 7])
+        by_index = dict(pairs)
+        for ref in call["plan"].subqueries[0].context_refs.values():
+            self.assertIn(ref, by_index)
+        self.assertEqual(by_index[7], QATurn(**PREVIOUS))
 
     def test_failed_is_invalid_without_plan(self):
         result, _, _ = self.run_review({"status": "failed", "reason": "Sai ý."})

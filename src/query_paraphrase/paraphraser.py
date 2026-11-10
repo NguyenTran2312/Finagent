@@ -47,6 +47,9 @@ class QueryParaphraser:
     ``llm`` may return JSON text, a mapping or a Pydantic model; whatever it returns is
     re-validated strictly by validate_plan. Defaults for settings and registry are
     resolved once at construction.
+
+    ``semantic_reviewer(question=, qa_history=, plan=)`` runs only for a valid plan and gets
+    qa_history as the retained (original_index, QATurn) pairs, matching plan context_refs.
     """
 
     def __init__(self, llm: Callable, *, registry: EntityRegistry | None = None,
@@ -75,11 +78,13 @@ class QueryParaphraser:
                                settings=self._settings)
         if result.status != "valid" or self._reviewer is None:
             return result
-        return self._review(question, [turn for _, turn in history], result)
+        return self._review(question, history, result)
 
-    def _review(self, question: str, turns: list[QATurn], result: ParaphraseResult):
+    def _review(self, question: str, history: list[tuple[int, QATurn]],
+                result: ParaphraseResult):
+        """Call the reviewer with (original_index, QATurn) pairs, the indexes context_refs use."""
         try:
-            raw = self._reviewer(question=question, qa_history=turns, plan=result.plan)
+            raw = self._reviewer(question=question, qa_history=history, plan=result.plan)
         except self._provider_errors as error:
             return _unavailable("semantic_reviewer_unavailable", error, "semantic reviewer",
                                 "unknown")
