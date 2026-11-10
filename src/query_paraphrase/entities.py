@@ -8,10 +8,13 @@ from src.preprocess.cleaner import clean_text, fold_text
 
 CSV_HEADER = ["Mã CK", "Tên công ty"]
 _TICKER_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z][A-Z0-9]{2,3}(?![A-Za-z0-9])")
+# Period tokens such as FY23, Q123 or H124 (fiscal year, quarter, half + year) are not tickers.
+_PERIOD_TOKEN_RE = re.compile(r"(?:FY|Q[1-4]|H[12])(?:\d{2}|\d{4})?")
 # Finance acronyms that look like tickers but are not companies.
 FINANCE_ACRONYMS = frozenset({
     "LNST", "LNTT", "BCTC", "CTCP", "TMCP", "TNDN", "ROE", "ROA", "EPS", "VND", "USD",
     "GDP", "YOY", "QOQ", "TTM", "VAT", "IFRS", "VAS", "HOSE", "HNX", "UPCOM",
+    "EBIT", "ROIC", "NIM", "NPL", "CASA", "GTGT", "KQKD", "LCTT", "VCSH",
 })
 
 Aliases = Mapping[str, str | Sequence[str]]
@@ -66,10 +69,15 @@ class EntityRegistry:
     def resolve(self, name: str) -> set[str]:
         return set(self._keys.get(fold_text(name), ()))
 
+    def mention_spans(self, text: str) -> list[tuple[int, int, frozenset[str]]]:
+        """Return (start, end, tickers) per registry match, offsets into fold_text(text)."""
+        return [(match.start(), match.end(), frozenset(self._keys[match.group()]))
+                for match in self._pattern.finditer(fold_text(text))]
+
     def find_mentions(self, text: str) -> set[str]:
         found: set[str] = set()
-        for match in self._pattern.finditer(fold_text(text)):
-            found |= self._keys[match.group()]
+        for _, _, tickers in self.mention_spans(text):
+            found |= tickers
         return found
 
     def company_name(self, ticker: str) -> str | None:
@@ -77,4 +85,5 @@ class EntityRegistry:
 
     def unknown_ticker_candidates(self, text: str) -> set[str]:
         return {c for c in _TICKER_CANDIDATE_RE.findall(clean_text(text))
-                if c not in self._names and c not in FINANCE_ACRONYMS}
+                if c not in self._names and c not in FINANCE_ACRONYMS
+                and not _PERIOD_TOKEN_RE.fullmatch(c)}

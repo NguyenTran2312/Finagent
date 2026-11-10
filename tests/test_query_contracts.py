@@ -8,6 +8,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from config.settings import ParaphraseSettings, load_paraphrase_settings
+from src.preprocess.cleaner import fold_text
 from src.query_paraphrase.entities import EntityRegistry
 from src.query_paraphrase.metric_catalog import find_metrics, normalize_metric
 from src.query_paraphrase.schemas import (
@@ -193,6 +194,21 @@ class EntityRegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.find_mentions("LNST LNTT EBITDA BCTC ZZZ"), set())
         self.assertEqual(self.registry.unknown_ticker_candidates("LNST LNTT EBITDA BCTC ZZZ"),
                          {"ZZZ"})
+
+    def test_finance_acronyms_and_period_tokens_are_not_unknown_tickers(self):
+        text = ("EBIT ROE ROA ROIC NIM NPL CASA GTGT KQKD BCTC LCTT TNDN VCSH EPS "
+                "FY23 FY2023 Q1 H1 Q123 H224 ZZZ")
+        self.assertEqual(self.registry.unknown_ticker_candidates(text), {"ZZZ"})
+        self.assertEqual(self.registry.find_mentions(text), set())
+
+    def test_mention_spans_report_folded_offsets_in_order(self):
+        text = "Doanh thu VJC 2022 và CTCP Tập đoàn Hòa Phát 2023"
+        spans = self.registry.mention_spans(text)
+        self.assertEqual([tickers for _, _, tickers in spans],
+                         [frozenset({"VJC"}), frozenset({"HPG"})])
+        folded = fold_text(text)
+        self.assertEqual([folded[start:end] for start, end, _ in spans],
+                         ["vjc", "ctcp tap doan hoa phat"])
 
     def test_alias_collisions_remain_ambiguous(self):
         registry = EntityRegistry.from_csv(ROOT / "data" / "code_stock.csv",
