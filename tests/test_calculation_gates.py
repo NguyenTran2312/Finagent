@@ -293,6 +293,22 @@ class FormulaTests(unittest.TestCase):
         self.assertEqual([i.message.split("'")[1] for i in errors(report, "formula")],
                          ["owners_equity"])
 
+    def test_named_leaf_satisfied_by_metric_evaluation(self):
+        # The leaf is read only inside metric("interest_coverage") — its fact_keys carry it.
+        ctx = context(unit="times", named={"interest_coverage", "profit_before_tax"})
+        report = gates(ICR_CODE, icr_program, ctx=ctx)
+        self.assertTrue(report.passed, report.issues)
+        # A named DERIVED node still needs its own metric() step (nested ebit records one).
+        self.assertTrue(gates(ICR_CODE, icr_program,
+                              ctx=context(unit="times", named={"ebit"})).passed)
+        self.assertEqual(TREE.kind("gross_margin"), "derived")
+        report = gates(ICR_CODE, icr_program, ctx=context(unit="times", named={"gross_margin"}))
+        self.assertEqual([i.message.split("'")[1] for i in errors(report, "formula")],
+                         ["gross_margin"])
+        # A leaf the evaluation never touched is still reported.
+        report = gates(ICR_CODE, icr_program, ctx=context(unit="times", named={"net_revenue"}))
+        self.assertEqual(len(errors(report, "formula")), 1)
+
     def test_unknown_named_metric_is_error(self):
         report = gates(ICR_CODE, icr_program, ctx=context(named={"no_such_metric"}))
         self.assertEqual(len(errors(report, "formula")), 1)

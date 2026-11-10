@@ -284,6 +284,8 @@ def _formula(steps: list[TraceStep], tree: MetricTree, context: ExecutionContext
              metrics_used: frozenset[str]) -> list[GateIssue]:
     # R2 + R17: a named leaf may be read by fact() or averaged by avg_balance()
     facts_read = {s.args[0] for s in steps if s.helper in ("fact", "avg_balance") and s.args}
+    # ... or read inside a metric() evaluation (its fact_keys); derived nodes still need metric(id)
+    facts_read |= {k.metric_id for s in steps if s.helper == "metric" for k in s.fact_keys}
     issues = []
     for node_id in sorted(context.named_metrics):
         try:
