@@ -1,0 +1,287 @@
+# Corporate (VAS, Circular 200/2014/TT-BTC) statement leaves.
+# Codes are the "Mã số" column; they were checked against the corpus with
+# scripts/verify_metric_codes.py (manual, read-only). Costs are printed in
+# parentheses in many reports, so derived formulas wrap them in abs().
+# The template ("corporate") comes from this file name (ruling R1).
+
+# ---- income statement ---------------------------------------------------
+- id: gross_revenue
+  label_vi: Doanh thu bán hàng và cung cấp dịch vụ
+  aliases: [doanh thu bán hàng và cung cấp dịch vụ, tổng doanh thu bán hàng và cung cấp dịch vụ]
+  statement_kind: income_statement
+  codes: ["01"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: net_revenue
+  label_vi: Doanh thu thuần về bán hàng và cung cấp dịch vụ
+  aliases: [doanh thu thuần, doanh thu thuần về bán hàng và cung cấp dịch vụ,
+            doanh thu thuần bán hàng và cung cấp dịch vụ]
+  statement_kind: income_statement
+  codes: ["10"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: cost_of_goods_sold
+  label_vi: Giá vốn hàng bán
+  aliases: [giá vốn hàng bán, giá vốn hàng bán và dịch vụ cung cấp, cogs]
+  statement_kind: income_statement
+  codes: ["11"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: gross_profit_reported
+  label_vi: Lợi nhuận gộp về bán hàng và cung cấp dịch vụ
+  aliases: [lợi nhuận gộp về bán hàng và cung cấp dịch vụ,
+            lợi nhuận/(lỗ) gộp về bán hàng và cung cấp dịch vụ]
+  statement_kind: income_statement
+  codes: ["20"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: financial_income
+  label_vi: Doanh thu hoạt động tài chính
+  aliases: [doanh thu hoạt động tài chính, doanh thu tài chính, thu nhập tài chính]
+  statement_kind: income_statement
+  codes: ["21"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: financial_expenses
+  label_vi: Chi phí tài chính
+  aliases: [chi phí tài chính]
+  statement_kind: income_statement
+  codes: ["22"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: interest_expense
+  label_vi: Chi phí lãi vay
+  aliases: [chi phí lãi vay, trong đó chi phí lãi vay]
+  statement_kind: income_statement
+  codes: ["23"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: selling_expenses
+  label_vi: Chi phí bán hàng
+  aliases: [chi phí bán hàng]
+  statement_kind: income_statement
+  codes: ["25"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: admin_expenses
+  label_vi: Chi phí quản lý doanh nghiệp
+  aliases: [chi phí quản lý doanh nghiệp, chi phí qldn]
+  statement_kind: income_statement
+  codes: ["26"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: operating_profit
+  label_vi: Lợi nhuận thuần từ hoạt động kinh doanh
+  aliases: [lợi nhuận thuần từ hoạt động kinh doanh,
+            lợi nhuận/(lỗ) thuần từ hoạt động kinh doanh]
+  statement_kind: income_statement
+  codes: ["30"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: other_income
+  label_vi: Thu nhập khác
+  aliases: [thu nhập khác]
+  statement_kind: income_statement
+  codes: ["31"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: other_expenses
+  label_vi: Chi phí khác
+  aliases: [chi phí khác]
+  statement_kind: income_statement
+  codes: ["32"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: profit_before_tax
+  label_vi: Tổng lợi nhuận kế toán trước thuế
+  aliases: [lntt, lợi nhuận trước thuế, tổng lợi nhuận kế toán trước thuế,
+            lợi nhuận kế toán trước thuế, tổng lợi nhuận/(lỗ) kế toán trước thuế,
+            tổng lợi nhuận trước thuế]
+  statement_kind: income_statement
+  codes: ["50"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: profit_after_tax
+  label_vi: Lợi nhuận sau thuế thu nhập doanh nghiệp
+  aliases: [lnst, lợi nhuận sau thuế, lợi nhuận sau thuế thu nhập doanh nghiệp,
+            lợi nhuận sau thuế tndn, lợi nhuận/(lỗ) sau thuế tndn,
+            lợi nhuận/(lỗ) sau thuế thu nhập doanh nghiệp]
+  statement_kind: income_statement
+  codes: ["60"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: profit_after_tax_parent_share
+  label_vi: Lợi nhuận sau thuế của cổ đông của công ty mẹ
+  aliases: [lợi nhuận sau thuế của cổ đông của công ty mẹ,
+            lợi nhuận sau thuế thuộc cổ đông công ty mẹ,
+            lợi nhuận sau thuế của cổ đông công ty mẹ,
+            lnst thuộc cổ đông công ty mẹ, lnst của cổ đông công ty mẹ]
+  statement_kind: income_statement
+  codes: ["61"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: basic_eps
+  label_vi: Lãi cơ bản trên cổ phiếu
+  aliases: [lãi cơ bản trên cổ phiếu, lãi cơ bản trên mỗi cổ phiếu,
+            lãi cơ bản trên một cổ phiếu, eps cơ bản]
+  statement_kind: income_statement
+  codes: ["70"]
+  period_kind: flow
+  source: statement
+  dimension: money_per_share
+
+# ---- balance sheet ------------------------------------------------------
+- id: current_assets
+  label_vi: Tài sản ngắn hạn
+  aliases: [tài sản ngắn hạn, tổng tài sản ngắn hạn]
+  statement_kind: balance_sheet
+  codes: ["100"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: cash_and_equivalents
+  label_vi: Tiền và các khoản tương đương tiền
+  aliases: [tiền và các khoản tương đương tiền, tiền và tương đương tiền]
+  statement_kind: balance_sheet
+  codes: ["110"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: inventories
+  label_vi: Hàng tồn kho
+  aliases: [hàng tồn kho, hàng tồn kho thuần]
+  statement_kind: balance_sheet
+  codes: ["140"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: long_term_assets
+  label_vi: Tài sản dài hạn
+  aliases: [tài sản dài hạn, tổng tài sản dài hạn]
+  statement_kind: balance_sheet
+  codes: ["200"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: construction_in_progress
+  label_vi: Chi phí xây dựng cơ bản dở dang
+  aliases: [chi phí xây dựng cơ bản dở dang, xây dựng cơ bản dở dang,
+            chi phí xây dựng cơ bản đang dở dang]
+  statement_kind: balance_sheet
+  codes: ["242"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: total_assets
+  label_vi: Tổng tài sản
+  aliases: [tổng tài sản, tổng cộng tài sản, tổng nguồn vốn]
+  statement_kind: balance_sheet
+  codes: ["270"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: liabilities
+  label_vi: Nợ phải trả
+  aliases: [nợ phải trả, tổng nợ phải trả]
+  statement_kind: balance_sheet
+  codes: ["300"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: current_liabilities
+  label_vi: Nợ ngắn hạn
+  aliases: [nợ ngắn hạn, tổng nợ ngắn hạn, nợ phải trả ngắn hạn]
+  statement_kind: balance_sheet
+  codes: ["310"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: short_term_borrowings
+  label_vi: Vay và nợ thuê tài chính ngắn hạn
+  aliases: [vay và nợ thuê tài chính ngắn hạn, vay và nợ ngắn hạn, khoản vay ngắn hạn,
+            nợ vay ngắn hạn]
+  statement_kind: balance_sheet
+  codes: ["320"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: long_term_borrowings
+  label_vi: Vay và nợ thuê tài chính dài hạn
+  aliases: [vay và nợ thuê tài chính dài hạn, vay và nợ dài hạn, khoản vay dài hạn,
+            nợ vay dài hạn]
+  statement_kind: balance_sheet
+  codes: ["338"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+- id: owners_equity
+  label_vi: Vốn chủ sở hữu
+  aliases: [vốn chủ sở hữu, tổng vốn chủ sở hữu]
+  statement_kind: balance_sheet
+  codes: ["400"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+# ---- cash flow statement ------------------------------------------------
+- id: cfo
+  label_vi: Lưu chuyển tiền thuần từ hoạt động kinh doanh
+  aliases: [lưu chuyển tiền thuần từ hoạt động kinh doanh,
+            lưu chuyển tiền tệ thuần từ hoạt động kinh doanh,
+            dòng tiền thuần từ hoạt động kinh doanh, dòng tiền từ hoạt động kinh doanh,
+            dòng tiền hoạt động kinh doanh, dòng tiền hoạt động, cfo]
+  statement_kind: cash_flow
+  codes: ["20"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+- id: depreciation
+  label_vi: Khấu hao tài sản cố định
+  aliases: [khấu hao tài sản cố định, khấu hao tscđ, khấu hao tscđ và bđsđt,
+            khấu hao và phân bổ, khấu hao và hao mòn, chi phí khấu hao và hao mòn]
+  statement_kind: cash_flow
+  codes: ["02"]
+  period_kind: flow
+  source: statement
+  dimension: money

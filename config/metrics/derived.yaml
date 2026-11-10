@@ -1,0 +1,214 @@
+# Derived metrics (v1, plan decision D9). Formulas are ordered: the first whose
+# leaves are all available gives the value, the others are cross-checks.
+# Costs may be printed negative (in parentheses), hence abs() on cost leaves.
+# Ratios are stored as plain ratios; `display` is the default display unit.
+
+- id: gross_profit
+  label_vi: Lợi nhuận gộp
+  aliases: [lợi nhuận gộp, lãi gộp]
+  templates: [corporate]
+  dimension: money
+  formulas:
+    - gross_profit_reported
+    - net_revenue - abs(cost_of_goods_sold)
+
+- id: gross_margin
+  label_vi: Biên lợi nhuận gộp
+  aliases: [biên lợi nhuận gộp, biên lãi gộp, tỷ suất lợi nhuận gộp, tỉ suất lợi nhuận gộp,
+            lợi nhuận gộp trên doanh thu thuần]
+  templates: [corporate]
+  dimension: ratio
+  display: percent
+  formulas:
+    - gross_profit / net_revenue
+
+- id: net_margin
+  label_vi: Biên lợi nhuận ròng
+  aliases: [biên lợi nhuận ròng, biên lợi nhuận sau thuế, tỷ suất lợi nhuận ròng,
+            tỉ suất lợi nhuận ròng, lợi nhuận sau thuế trên doanh thu thuần]
+  templates: [corporate]
+  dimension: ratio
+  display: percent
+  formulas:
+    - profit_after_tax / net_revenue
+
+- id: ebit
+  label_vi: Lợi nhuận trước lãi vay và thuế
+  aliases: [ebit, lợi nhuận trước lãi vay và thuế, lợi nhuận trước thuế và lãi vay]
+  templates: [corporate]
+  dimension: money
+  formulas:
+    - profit_before_tax + abs(interest_expense)
+
+- id: interest_coverage
+  label_vi: Hệ số khả năng thanh toán lãi vay
+  aliases: [hệ số khả năng thanh toán lãi vay, khả năng thanh toán lãi vay,
+            hệ số thanh toán lãi vay, icr]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  formulas:
+    - ebit / abs(interest_expense)
+
+- id: liabilities_to_equity
+  label_vi: Hệ số nợ phải trả trên vốn chủ sở hữu
+  aliases: [nợ phải trả trên vốn chủ sở hữu, hệ số nợ phải trả trên vốn chủ sở hữu,
+            tỷ lệ nợ phải trả trên vốn chủ sở hữu, nợ phải trả/vốn chủ sở hữu,
+            nợ phải trả chia cho vốn chủ sở hữu, tỷ số d/e, hệ số d/e]
+  templates: [corporate, bank]
+  dimension: ratio
+  display: times
+  formulas:
+    - liabilities / owners_equity
+
+- id: borrowings_to_equity
+  label_vi: Hệ số nợ vay trên vốn chủ sở hữu
+  aliases: [nợ vay trên vốn chủ sở hữu, hệ số nợ vay trên vốn chủ sở hữu,
+            tỷ lệ nợ vay trên vốn chủ sở hữu, vay nợ trên vốn chủ sở hữu]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  formulas:
+    - (short_term_borrowings + long_term_borrowings) / owners_equity
+
+- id: current_ratio
+  label_vi: Hệ số thanh toán hiện hành
+  aliases: [hệ số thanh toán hiện hành, hệ số khả năng thanh toán hiện hành,
+            tỷ số thanh toán hiện hành, tỉ số thanh toán hiện hành, thanh toán hiện hành,
+            hệ số thanh toán ngắn hạn, khả năng thanh toán nợ ngắn hạn,
+            tài sản ngắn hạn trên nợ ngắn hạn]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  expected_range: [0, 1000]
+  formulas:
+    - current_assets / current_liabilities
+
+- id: quick_ratio
+  label_vi: Hệ số thanh toán nhanh
+  aliases: [hệ số thanh toán nhanh, hệ số khả năng thanh toán nhanh, tỷ số thanh toán nhanh,
+            tỉ số thanh toán nhanh, thanh toán nhanh]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  expected_range: [0, 1000]
+  formulas:
+    - (current_assets - inventories) / current_liabilities
+
+- id: cfo_to_current_liabilities
+  label_vi: Hệ số dòng tiền hoạt động trên nợ ngắn hạn
+  aliases: [dòng tiền hoạt động trên nợ ngắn hạn, hệ số dòng tiền hoạt động trên nợ ngắn hạn,
+            dòng tiền thuần từ hoạt động kinh doanh trên nợ ngắn hạn,
+            lưu chuyển tiền thuần từ hoạt động kinh doanh trên nợ ngắn hạn,
+            cfo trên nợ ngắn hạn]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  formulas:
+    - cfo / current_liabilities
+
+- id: cfo_to_profit_after_tax
+  label_vi: Hệ số dòng tiền hoạt động trên lợi nhuận sau thuế
+  aliases: [cfo/lnst, cfo trên lnst, cfo trên lợi nhuận sau thuế, hệ số chuyển đổi lợi nhuận,
+            dòng tiền hoạt động trên lợi nhuận sau thuế,
+            dòng tiền thuần từ hoạt động kinh doanh trên lợi nhuận sau thuế]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  formulas:
+    - cfo / profit_after_tax
+
+- id: cfo_margin
+  label_vi: Tỷ suất dòng tiền hoạt động trên doanh thu thuần
+  aliases: [cfo margin, cfo trên doanh thu thuần, dòng tiền hoạt động trên doanh thu thuần,
+            dòng tiền thuần từ hoạt động kinh doanh trên doanh thu thuần,
+            dòng tiền thuần từ hoạt động kinh doanh (cfo) trên doanh thu thuần,
+            lưu chuyển tiền thuần từ hoạt động kinh doanh trên doanh thu thuần]
+  templates: [corporate]
+  dimension: ratio
+  display: percent
+  formulas:
+    - cfo / net_revenue
+
+- id: asset_turnover
+  label_vi: Vòng quay tổng tài sản
+  aliases: [vòng quay tổng tài sản, hiệu suất sử dụng tổng tài sản]
+  templates: [corporate]
+  dimension: ratio
+  display: times
+  formulas:
+    - net_revenue / ((total_assets + total_assets[t-1]) / 2)
+
+- id: days_inventory
+  label_vi: Số ngày tồn kho bình quân
+  aliases: [số ngày tồn kho, số ngày hàng tồn kho, số ngày lưu kho, doh, dio]
+  templates: [corporate]
+  dimension: days
+  display: days
+  expected_range: [0, 36500]
+  formulas:
+    - ((inventories + inventories[t-1]) / 2) / abs(cost_of_goods_sold) * 365
+
+- id: selling_and_admin_expenses
+  label_vi: Chi phí bán hàng và chi phí quản lý doanh nghiệp
+  aliases: [chi phí bán hàng và chi phí quản lý doanh nghiệp,
+            chi phí bán hàng và quản lý doanh nghiệp, chi phí bán hàng và quản lý]
+  templates: [corporate]
+  dimension: money
+  formulas:
+    - abs(selling_expenses) + abs(admin_expenses)
+
+- id: long_term_assets_share
+  label_vi: Tỷ trọng tài sản dài hạn trên tổng tài sản
+  aliases: [tỷ trọng tài sản dài hạn, tỉ trọng tài sản dài hạn,
+            tài sản dài hạn trên tổng tài sản, tỷ trọng tài sản dài hạn trên tổng tài sản,
+            tỉ trọng tài sản dài hạn trên tổng tài sản]
+  templates: [corporate]
+  dimension: ratio
+  display: percent
+  formulas:
+    - long_term_assets / total_assets
+
+- id: roe
+  label_vi: Tỷ suất lợi nhuận sau thuế trên vốn chủ sở hữu bình quân
+  aliases: [roe, lợi nhuận sau thuế trên vốn chủ sở hữu,
+            tỷ suất lợi nhuận sau thuế trên vốn chủ sở hữu, tỷ suất sinh lời trên vốn chủ sở hữu,
+            lợi nhuận trên vốn chủ sở hữu]
+  templates: [corporate, bank]
+  dimension: ratio
+  display: percent
+  formulas:
+    - profit_after_tax / ((owners_equity + owners_equity[t-1]) / 2)
+
+- id: roa
+  label_vi: Tỷ suất lợi nhuận sau thuế trên tổng tài sản bình quân
+  aliases: [roa, lợi nhuận sau thuế trên tổng tài sản, tỷ suất lợi nhuận trên tổng tài sản,
+            tỷ suất sinh lời trên tổng tài sản, lợi nhuận trên tổng tài sản]
+  templates: [corporate, bank]
+  dimension: ratio
+  display: percent
+  formulas:
+    - profit_after_tax / ((total_assets + total_assets[t-1]) / 2)
+
+- id: loan_to_deposit
+  label_vi: Tỷ lệ cho vay khách hàng trên tiền gửi của khách hàng
+  aliases: [ldr, tỷ lệ cho vay trên tiền gửi, cho vay khách hàng trên tiền gửi của khách hàng,
+            cho vay khách hàng trên tiền gửi khách hàng,
+            cho vay khách hàng trên tổng tiền gửi khách hàng]
+  templates: [bank]
+  dimension: ratio
+  display: percent
+  expected_range: [0, 10]
+  formulas:
+    - customer_loans_gross / customer_deposits
+
+- id: loan_provision_ratio
+  label_vi: Tỷ lệ dự phòng rủi ro cho vay khách hàng
+  aliases: [tỷ lệ dự phòng rủi ro cho vay khách hàng, tỷ lệ dự phòng cho vay khách hàng,
+            dự phòng rủi ro cho vay khách hàng trên cho vay khách hàng]
+  templates: [bank]
+  dimension: ratio
+  display: percent
+  expected_range: [0, 1]
+  formulas:
+    - abs(customer_loan_provision) / customer_loans_gross
