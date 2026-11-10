@@ -55,6 +55,21 @@
   source: statement
   dimension: money
 
+# Owns the pre-provision profit line (IX) so it does not resolve to the provision
+# expense (X) whose label it contains.
+- id: operating_profit_before_provision
+  label_vi: Lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro tín dụng
+  aliases: [lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro tín dụng,
+            lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro,
+            lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng,
+            lợi nhuận thuần từ hđkd trước chi phí dự phòng rủi ro tín dụng,
+            lợi nhuận trước dự phòng]
+  statement_kind: income_statement
+  codes: []
+  period_kind: flow
+  source: statement
+  dimension: money
+
 - id: credit_risk_provision_expense
   label_vi: Chi phí dự phòng rủi ro tín dụng
   aliases: [chi phí dự phòng rủi ro tín dụng, chi phí dự phòng rủi ro, chi phí dự phòng tín dụng,

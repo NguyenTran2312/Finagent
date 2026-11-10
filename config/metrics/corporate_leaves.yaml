@@ -143,9 +143,26 @@
   aliases: [lợi nhuận sau thuế của cổ đông của công ty mẹ,
             lợi nhuận sau thuế thuộc cổ đông công ty mẹ,
             lợi nhuận sau thuế của cổ đông công ty mẹ,
-            lnst thuộc cổ đông công ty mẹ, lnst của cổ đông công ty mẹ]
+            lnst thuộc cổ đông công ty mẹ, lnst của cổ đông công ty mẹ,
+            lợi nhuận sau thuế thuộc về cổ đông của công ty mẹ,
+            lợi nhuận sau thuế thuộc về cổ đông công ty mẹ,
+            lợi nhuận sau thuế thuộc cổ đông của công ty mẹ,
+            lnst thuộc về cổ đông công ty mẹ, lnst thuộc về cổ đông của công ty mẹ]
   statement_kind: income_statement
   codes: ["61"]
+  period_kind: flow
+  source: statement
+  dimension: money
+
+# Bare "cổ đông không kiểm soát" is not an alias: it is inside the balance sheet line
+# 429 "Lợi ích cổ đông không kiểm soát" (NCI equity), which is not this flow item.
+- id: profit_after_tax_nci
+  label_vi: Lợi nhuận sau thuế của cổ đông không kiểm soát
+  aliases: [lợi nhuận sau thuế của cổ đông không kiểm soát,
+            lợi nhuận sau thuế thuộc cổ đông không kiểm soát,
+            lnst của cổ đông không kiểm soát]
+  statement_kind: income_statement
+  codes: ["62"]
   period_kind: flow
   source: statement
   dimension: money
@@ -237,7 +254,7 @@
 - id: short_term_borrowings
   label_vi: Vay và nợ thuê tài chính ngắn hạn
   aliases: [vay và nợ thuê tài chính ngắn hạn, vay và nợ ngắn hạn, khoản vay ngắn hạn,
-            nợ vay ngắn hạn]
+            nợ vay ngắn hạn, số dư vay ngắn hạn]
   statement_kind: balance_sheet
   codes: ["320"]
   period_kind: closing
@@ -247,7 +264,7 @@
 - id: long_term_borrowings
   label_vi: Vay và nợ thuê tài chính dài hạn
   aliases: [vay và nợ thuê tài chính dài hạn, vay và nợ dài hạn, khoản vay dài hạn,
-            nợ vay dài hạn]
+            nợ vay dài hạn, số dư vay dài hạn]
   statement_kind: balance_sheet
   codes: ["338"]
   period_kind: closing
@@ -261,6 +278,28 @@
   codes: ["400"]
   period_kind: closing
   source: statement
+  dimension: money
+
+- id: retained_earnings
+  label_vi: Lợi nhuận sau thuế chưa phân phối
+  aliases: [lợi nhuận sau thuế chưa phân phối, lnst chưa phân phối]
+  statement_kind: balance_sheet
+  codes: ["421"]
+  period_kind: closing
+  source: statement
+  dimension: money
+
+# ---- notes --------------------------------------------------------------
+# Accrued interest payable is a note line (inside "Chi phí phải trả"), not a coded
+# statement line; it owns these phrases so they do not resolve to interest_expense.
+- id: accrued_interest_payable
+  label_vi: Chi phí lãi vay phải trả
+  aliases: [chi phí lãi vay phải trả, chi phí lãi vay ngắn hạn phải trả,
+            chi phí lãi vay phải trả ngắn hạn, lãi vay phải trả]
+  statement_kind: note
+  codes: []
+  period_kind: closing
+  source: notes
   dimension: money
 
 # ---- cash flow statement ------------------------------------------------

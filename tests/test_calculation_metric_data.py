@@ -14,13 +14,14 @@ CORPORATE_LEAVES = (
     "current_assets", "cash_and_equivalents", "inventories", "long_term_assets",
     "construction_in_progress", "total_assets", "liabilities", "current_liabilities",
     "short_term_borrowings", "long_term_borrowings", "owners_equity", "cfo", "depreciation",
+    "profit_after_tax_nci", "retained_earnings", "accrued_interest_payable",
 )
 BANK_LEAVES = (
     "interest_and_similar_income", "interest_and_similar_expenses", "net_interest_income",
     "net_fee_income", "operating_expenses", "credit_risk_provision_expense",
     "profit_before_tax", "profit_after_tax", "total_assets", "customer_loans_section",
     "customer_loans_gross", "customer_loan_provision", "deposits_at_other_credit_institutions",
-    "customer_deposits", "liabilities", "owners_equity",
+    "customer_deposits", "liabilities", "owners_equity", "operating_profit_before_provision",
 )
 DERIVED = {
     "gross_profit": ("corporate",), "gross_margin": ("corporate",), "net_margin": ("corporate",),
@@ -119,6 +120,18 @@ class MetricDataTest(unittest.TestCase):
             "hệ số chuyển đổi lợi nhuận (CFO/LNST)": "cfo_to_profit_after_tax",
             "tỷ trọng tài sản dài hạn trên tổng tài sản": "long_term_assets_share",
             "Khấu hao và phân bổ": "depreciation",
+            # "thuộc về" phrasings of the parent-shareholder share (review fix round 1)
+            "Lợi nhuận sau thuế thuộc về cổ đông của công ty mẹ": "profit_after_tax_parent_share",
+            "Lợi nhuận sau thuế thuộc về cổ đông công ty mẹ": "profit_after_tax_parent_share",
+            "LNST thuộc về cổ đông công ty mẹ": "profit_after_tax_parent_share",
+            "Lợi nhuận sau thuế thuộc cổ đông của công ty mẹ": "profit_after_tax_parent_share",
+            # longer phrases owned by their own nodes (ViFinQA Q286, Q601, Q891, Q964)
+            "Lợi nhuận sau thuế chưa phân phối cuối năm 2015": "retained_earnings",
+            "Lợi nhuận sau thuế của cổ đông không kiểm soát": "profit_after_tax_nci",
+            "Chi phí lãi vay phải trả ngắn hạn của công ty mẹ KBC": "accrued_interest_payable",
+            "chi phí lãi vay ngắn hạn phải trả vào cuối năm 2022": "accrued_interest_payable",
+            "Số dư vay ngắn hạn": "short_term_borrowings",
+            "Số dư vay dài hạn": "long_term_borrowings",
         }
         for text, node_id in cases.items():
             self.assertEqual(self.tree.find_by_alias(text, "corporate"), {node_id}, text)
@@ -126,6 +139,23 @@ class MetricDataTest(unittest.TestCase):
                          {"customer_loan_provision"})
         self.assertEqual(self.tree.find_by_alias("Tiền gửi của khách hàng", "bank"),
                          {"customer_deposits"})
+        # ViFinQA Q528: the pre-provision profit line contains the provision expense label.
+        self.assertEqual(self.tree.find_by_alias(
+            "lợi nhuận thuần từ hoạt động kinh doanh trước chi phí dự phòng rủi ro tín dụng "
+            "bằng bao nhiêu %", "bank"), {"operating_profit_before_provision"})
+        self.assertEqual(self.tree.find_by_alias("Chi phí dự phòng rủi ro tín dụng", "bank"),
+                         {"credit_risk_provision_expense"})
+
+    def test_known_alias_collisions(self):
+        # KNOWN COLLISIONS, pinned on purpose: no node owns these longer phrases, so
+        # alias lookup returns a node that is NOT what the question asks for. The agent
+        # must treat these resolutions cautiously (check the statement line / note).
+        # ViFinQA Q157: investment-fund note, not the balance-sheet total.
+        self.assertEqual(self.tree.find_by_alias(
+            "Tổng nguồn vốn đầu tư xây dựng cơ bản của VGT", "corporate"), {"total_assets"})
+        # ViFinQA Q118: general provision note line, not gross customer loans.
+        self.assertEqual(self.tree.find_by_alias(
+            "dự phòng chung cho các khoản cho vay khách hàng", "bank"), {"customer_loans_gross"})
 
     def test_bare_cong_ty_me_is_scope_not_parent_share(self):
         # "công ty mẹ" alone names the separate report (query_paraphrase validator/prompts),

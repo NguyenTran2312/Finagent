@@ -7,8 +7,10 @@ Not imported by tests. Run from the repository root:
 Corporate leaves: for a fixed sample of consolidated reports of VAS (Circular 200)
 companies, every row of every table whose statement_kind equals the leaf's is read;
 rows whose "Mã số" equals one of the leaf's codes are collected and the most common
-folded label is printed next to the leaf's aliases. MATCH means the leaf's own
-aliases recognise that label (MetricTree.find_by_alias).
+folded label is printed next to the leaf's aliases. MATCH means alias lookup on that
+label returns exactly the leaf (MetricTree.find_by_alias(label) == {leaf}). ACCEPTED is
+a reviewed mismatch listed in ACCEPTED_MISMATCHES; it does not fail the run. Leaves
+without codes (source: notes) are listed as SKIP.
 
 Bank leaves: for a fixed sample of 10 bank reports, counts the reports in which a
 row label is recognised as the leaf. Leaves with a parent must sit inside a section
@@ -49,6 +51,11 @@ PASS_BANK = 8
 BANK_YEARS = (2017, 2019, 2021, 2023, 2025)
 # Tickers whose statements do not follow the Circular 200 corporate layout.
 NON_CORPORATE = frozenset({"SSI", "MBS", "FTS", "EVF", "BVH"})
+# Reviewed mismatches: leaf id -> folded top label (leading line numbers stripped).
+# Code 61's usual label "Lợi nhuận sau thuế của công ty mẹ" is not an alias, because
+# bare "công ty mẹ" means the separate report in this project (query_paraphrase).
+ACCEPTED_MISMATCHES = {"profit_after_tax_parent_share": "loi nhuan sau thue cua cong ty me"}
+_LEADING_NUMBERS = re.compile(r"^(?:\d+ )+")
 
 _CODE = re.compile(r"^\d{2,3}[a-z]?$")
 _CODE_PREFIX = re.compile(r"^(\d{2,3}[a-z]?)[.\s]+(\S.*)$")
@@ -131,7 +138,7 @@ def check_corporate(cur, tree: MetricTree, corporates: list[str]) -> int:
     print("   " + ", ".join(d.replace("_financial_statements_", " ").replace("_extracted", "")
                             for d in sample))
     leaves = [tree.leaf(i, "corporate") for i in leaf_ids("corporate_leaves.yaml")]
-    kinds = tuple(sorted({leaf.statement_kind.value for leaf in leaves}))
+    kinds = tuple(sorted({leaf.statement_kind.value for leaf in leaves if leaf.codes}))
     labels: dict[tuple[str, str], Counter] = {}
     docs_with: dict[tuple[str, str], set] = {}
     for doc in sample:
@@ -143,14 +150,24 @@ def check_corporate(cur, tree: MetricTree, corporates: list[str]) -> int:
                     docs_with.setdefault((kind, code), set()).add(doc)
     failures = 0
     for leaf in leaves:
+        if not leaf.codes:
+            print(f"{'SKIP':8} {leaf.id:30} {leaf.statement_kind.value:16} (source {leaf.source}, "
+                  "no statement code)")
+            continue
         for code in leaf.codes:
             key = (leaf.statement_kind.value, code)
             counter = labels.get(key, Counter())
             top = counter.most_common(1)
             top_label, top_n = top[0] if top else ("<none>", 0)
-            ok = leaf.id in tree.find_by_alias(top_label, "corporate")
+            if tree.find_by_alias(top_label, "corporate") == {leaf.id}:
+                status = "MATCH"
+            elif ACCEPTED_MISMATCHES.get(leaf.id) == _LEADING_NUMBERS.sub("", top_label):
+                status = "ACCEPTED"
+            else:
+                status = "MISMATCH"
+            ok = status != "MISMATCH"
             failures += not ok
-            print(f"{'MATCH' if ok else 'MISMATCH':8} {leaf.id:30} {key[0]:16} {code:>4} "
+            print(f"{status:8} {leaf.id:30} {key[0]:16} {code:>4} "
                   f"docs={len(docs_with.get(key, ())):2}/{len(sample)} "
                   f"top={top_label!r} ({top_n}/{sum(counter.values())})")
             if not ok:
