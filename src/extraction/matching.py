@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from functools import cache
 
 from src.calculation.metric_tree import LeafDef
+from src.calculation.units import Dimension
 from src.extraction.outcomes import Method
 from src.extraction.table_view import TableView, enumerator_level
 from src.indexing.table_semantics import TOTAL_MARKERS, StatementKind
@@ -38,18 +39,21 @@ def anchor_kinds(view: TableView, template_leaves: Sequence[LeafDef]) -> frozens
     """Statement kinds whose labels anchor ``view`` (§6.2 anchor rule; labels only, never codes).
 
     A kind anchors when the table's normalised row labels exactly equal a label or alias of
-    at least min(3, n) distinct statement leaves of that kind, n being the number of such leaves.
+    at least min(3, n) distinct statement leaves of that kind, n being the number of such leaves,
+    through at least min(3, n) distinct labels (leaves sharing a label do not count twice).
     """
-    labels = {view.norm_label(r) for r in view.data_rows}
+    labels = {view.norm_label(r) for r in _label_rows(view)}
     by_kind: dict[StatementKind, list[LeafDef]] = defaultdict(list)
     for leaf in template_leaves:
         if leaf.source == "statement" and leaf.statement_kind not in _UNTAGGED:
             by_kind[leaf.statement_kind].append(leaf)
-    return frozenset(
-        kind
-        for kind, leaves in by_kind.items()
-        if sum(bool(label_keys(leaf) & labels) for leaf in leaves) >= min(3, len(leaves))
-    )
+    anchored = set()
+    for kind, leaves in by_kind.items():
+        need = min(3, len(leaves))
+        matched = [label_keys(leaf) & labels for leaf in leaves]
+        if sum(map(bool, matched)) >= need and len(frozenset().union(*matched)) >= need:
+            anchored.add(kind)
+    return frozenset(anchored)
 
 
 def find_rows(leaf: LeafDef, views: Sequence[TableView], template_leaves: Sequence[LeafDef]) -> list[RowHit]:
@@ -57,9 +61,9 @@ def find_rows(leaf: LeafDef, views: Sequence[TableView], template_leaves: Sequen
 
     Statement leaves search tables tagged with their kind first and, only when those give no hit,
     ``note``/``unknown`` tables that anchor for exactly that kind. Note leaves search
-    ``note``/``unknown`` tables.
+    ``note``/``unknown`` tables. A table without a ``statement_kind`` counts as ``unknown``.
     """
-    untagged = [v for v in views if v.record.statement_kind in _UNTAGGED]
+    untagged = [v for v in views if v.record.statement_kind is None or v.record.statement_kind in _UNTAGGED]
     if leaf.source == "notes":
         return _ordered(hit for v in untagged for hit in _match(leaf, v, template_leaves))
     tagged = [v for v in views if v.record.statement_kind == leaf.statement_kind]
@@ -95,9 +99,21 @@ def _code_key(code: str) -> int | str:
     return int(code) if _DIGITS.fullmatch(code) else code
 
 
+def _is_heading(view: TableView, row_idx: int) -> bool:
+    """A top-level row (code A, B, ...) whose value cells are all empty, e.g. "B NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU"."""
+    return enumerator_level(view.code(row_idx)) == "top" and all(
+        not view.read(row_idx, col, Dimension.MONEY).location.raw_text for col in view.value_cols
+    )
+
+
+def _label_rows(view: TableView) -> list[int]:
+    """Data rows that may match by label: headings never do."""
+    return [r for r in view.data_rows if not _is_heading(view, r)]
+
+
 def _by_label(leaf: LeafDef, view: TableView, warnings: tuple[str, ...]) -> list[RowHit]:
     keys = label_keys(leaf)
-    return [RowHit(view, r, "label", warnings) for r in view.data_rows if view.norm_label(r) in keys]
+    return [RowHit(view, r, "label", warnings) for r in _label_rows(view) if view.norm_label(r) in keys]
 
 
 def _leaf(leaf_id: str, template_leaves: Sequence[LeafDef]) -> LeafDef:

@@ -1,3 +1,4 @@
+import dataclasses
 import unittest
 
 from src.calculation.metric_tree import MetricTree
@@ -278,6 +279,29 @@ class BankMatchingTests(unittest.TestCase):
         self.assertEqual(labels_of(hits), ["TỔNG TÀI SẢN", "TỔNG NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU"])
         self.assertEqual({h.method for h in hits}, {"label"})
 
+    def test_heading_row_is_never_a_label_hit(self):
+        # "B NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU" equals a total_assets alias but is a blank top-level heading.
+        rows = _BANK_BS_HEADER + [
+            ["A", "TÀI SẢN", "", "", ""],
+            ["I", "Tiền mặt, vàng bạc, đá quý", "4", "8.460.892", "7.509.877"],
+            ["", "TỔNG TÀI SẢN", "", "607.875.185", "527.769.944"],
+            ["B", "NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU", "", "", ""],
+            ["I", "Tiền gửi của khách hàng", "15", "80.000", "60.000"],
+            ["", "TỔNG NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU", "", "607.875.185", "527.769.944"],
+        ]
+        v = view(rows, kind="balance_sheet", year=2022)
+        self.assertEqual(v.code_col, 0)
+        hits = find_rows(tree.leaf("total_assets", "bank"), [v], bank)
+        self.assertEqual(labels_of(hits), ["TỔNG TÀI SẢN", "TỔNG NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU"])
+        # A top-level row that carries a value is not a heading.
+        rows[5] = ["B", "NỢ PHẢI TRẢ VÀ VỐN CHỦ SỞ HỮU", "", "607.875.185", ""]
+        v = view(rows, kind="balance_sheet", year=2022)
+        self.assertEqual(len(find_rows(tree.leaf("total_assets", "bank"), [v], bank)), 3)
+
+    def test_unknown_parent_raises(self):
+        orphan = dataclasses.replace(tree.leaf("customer_loans_gross", "bank"), parent="no_such_section")
+        self.assertRaises(ValueError, find_rows, orphan, [acb_bs_view()], bank)
+
     def test_bank_label_leaf(self):
         hits = find_rows(tree.leaf("net_interest_income", "bank"), [acb_is_view("income_statement")], bank)
         self.assertEqual([(h.method, h.view.code(h.row_idx)) for h in hits], [("label", "I")])
@@ -340,6 +364,49 @@ class CandidateTableTests(unittest.TestCase):
         )
         self.assertEqual(find_rows(tree.leaf("cfo", "corporate"), [both], corp), [])
         self.assertEqual(find_rows(tree.leaf("net_revenue", "corporate"), [both], corp), [])
+
+    def test_anchor_needs_distinct_labels(self):
+        loans = view(
+            [
+                ["", "31.12.2022 Triệu VND"],
+                ["Cho vay khách hàng", "413.706.244"],
+                ["Dự phòng rủi ro cho vay khách hàng", "(4.849.736)"],
+            ],
+            kind="note",
+            year=2022,
+        )
+        self.assertEqual(anchor_kinds(loans, bank), frozenset())
+        self.assertEqual(find_rows(tree.leaf("customer_loan_provision", "bank"), [loans], bank), [])
+        # Two leaves sharing one label: three matched leaves but two labels do not anchor.
+        shared = tuple(
+            dataclasses.replace(leaf, aliases=(*leaf.aliases, "cho vay khách hàng"))
+            if leaf.id == "customer_loans_section" else leaf
+            for leaf in bank
+        )
+        self.assertEqual(anchor_kinds(loans, shared), frozenset())
+        three = view(
+            [
+                ["", "31.12.2022 Triệu VND"],
+                ["Cho vay khách hàng", "413.706.244"],
+                ["Dự phòng rủi ro cho vay khách hàng", "(4.849.736)"],
+                ["Tiền gửi của khách hàng", "449.000.000"],
+            ],
+            kind="note",
+            year=2022,
+        )
+        self.assertEqual(anchor_kinds(three, shared), frozenset({StatementKind.BALANCE_SHEET}))
+
+    def test_untagged_table_counts_as_unknown(self):
+        rows = [
+            ["", "Số cuối năm", "Số đầu năm"],
+            ["Chi phí lãi vay phải trả", "12", "9"],
+        ]
+        untagged = view(rows, kind=None)
+        hits = find_rows(tree.leaf("accrued_interest_payable", "corporate"), [untagged], corp)
+        self.assertEqual(labels_of(hits), ["Chi phí lãi vay phải trả"])
+        anchored = acb_is_view(kind=None)
+        hits = find_rows(tree.leaf("net_interest_income", "bank"), [anchored], bank)
+        self.assertEqual([h.view.code(h.row_idx) for h in hits], ["I"])
 
     def test_anchor_only_note_or_unknown_tables(self):
         # A balance sheet carrying income statement labels is not an anchor candidate.
