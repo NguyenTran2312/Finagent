@@ -105,6 +105,51 @@ class TableViewTests(unittest.TestCase):
         r = view(rows).read(1, 2, Dimension.MONEY)
         self.assertEqual((r.status, r.reason), ("unit", "missing"))
 
+    def test_header_unit_corpus_forms(self):  # §6.7 amendment, real headers
+        for cell, scale in (("Tại 31/12/2025 VND", "1"), ("Số cuối nămVND", "1"),
+                            ("Vào ngày 31/12/2023 Triệu VND", "1E+6"), ("31 tháng 12 năm 2025 VND", "1")):
+            with self.subTest(cell=cell):
+                unit = header_unit([cell])
+                self.assertEqual((unit.unit_status, unit.currency, unit.scale_multiplier, unit.source_text),
+                                 ("valid", "VND", D(scale), cell))
+        self.assertEqual(header_unit(["Số cuối năm"]).unit_status, "unknown")
+
+    def test_context_unit_corpus_forms(self):  # §6.7 amendment, real table contexts
+        rows = [["Mã số", "TÀI SẢN", "Thuyết minh", "Số cuối năm", "Số đầu năm"],
+                ["100", "TÀI SẢN NGẮN HẠN", "", "1.234", "1.000"]]
+        cases = (
+            ("Công ty Cổ phần Đầu tư Thế Giới Di Động B01-DN/HN BẢNG CÂN ĐỐI KẾ TOÁN HỢP NHẤT "
+             "vào ngày 31 tháng 12 năm 2016 VND", "1", "VND"),
+            ("Công ty Cổ phần Hoàng Anh Gia Lai B01-DN BẢNG CÂN ĐỐI KẾ TOÁN TỔNG HỢP "
+             "ngày 31 tháng 12 năm 2017 Ngàn VND", "1E+3", "Ngàn VND"),
+            ("BẢNG CÂN ĐỐI KẾ TOÁN HỢP NHẤT (tiếp theo) vào ngày 31 tháng 12 năm 2016 VND", "1", "VND"),
+            ("BÁO CÁO KẾT QUẢ HOẠT ĐỘNG KINH DOANH cho năm tài chính kết thúc ngày 31/12/2016 Triệu VND",
+             "1E+6", "Triệu VND"),
+            ("BÀNG CÂN ĐÔI KÊ TOÁN RIÊNG ngày 31 tháng 12 năm 2017 Đơn vị tinh: VND", "1",
+             "Đơn vị tinh: VND"),
+            ("BẢNG CÂN ĐỐI KẾ TOÁN RIÊNG Tại ngày 31 tháng 12 năm 2016 (Tiếp theo) "
+             "Đơn vị tính: đồng Việt Nam", "1", "Đơn vị tính: đồng Việt Nam"),
+        )
+        for context, scale, unit_text in cases:
+            with self.subTest(context=context[-40:]):
+                r = view(rows, kind="balance_sheet", context=context).read(1, 3, Dimension.MONEY)
+                self.assertEqual((r.status, r.source.scale, r.source.unit_text), ("ok", D(scale), unit_text))
+
+    def test_context_without_unit_stays_missing(self):
+        rows = [["Mã số", "TÀI SẢN", "Số cuối năm"], ["100", "TÀI SẢN NGẮN HẠN", "1.234"]]
+        for context in ("BẢNG CÂN ĐỐI KẾ TOÁN cho năm tài chính kết thúc ngày 31/12/2016 Công ty TNHH ABC",
+                        "BẢNG CÂN ĐỐI KẾ TOÁN ngày 31 tháng 12 năm 2016",
+                        "Phải thu của đơn vị khác 2016 Đầu tư vào đơn vị trực thuộc",
+                        "BẢNG CÂN ĐỐI KẾ TOÁN VND năm 2016 Công ty"):
+            with self.subTest(context=context):
+                r = view(rows, kind="balance_sheet", context=context).read(1, 2, Dimension.MONEY)
+                self.assertEqual((r.status, r.reason), ("unit", "missing"))
+
+    def test_header_unit_beats_context_unit(self):
+        rows = [["Mã số", "TÀI SẢN", "Số cuối năm Triệu VND"], ["100", "TÀI SẢN NGẮN HẠN", "1.234"]]
+        r = view(rows, context="BẢNG CÂN ĐỐI KẾ TOÁN ngày 31 tháng 12 năm 2016 VND").read(1, 2, Dimension.MONEY)
+        self.assertEqual((r.status, r.source.scale), ("ok", D("1E+6")))
+
     def test_code_column_rules(self):
         self.assertEqual(vjc_view().code_col, 0)  # "Mã số" header
         codes = [["Chỉ tiêu", "", "Năm nay"], ["Doanh thu", "01", "1.000"], ["Giá vốn", "02", "900"],

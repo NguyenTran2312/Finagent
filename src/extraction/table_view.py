@@ -44,7 +44,7 @@ _NO_UNIT = ParsedFinancialUnit(None, None, "unknown", "unknown", "", "No explici
 # §6.7: dates, four-digit years and period phrases are removed before a header cell is parsed as a unit.
 _DATE_RES = (
     re.compile(r"(?<!\d)\d{1,2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{4}(?!\d)"),
-    re.compile(r"ng[àa]y\s*\d{1,2}\s*th[áa]ng\s*\d{1,2}(?:\s*n[ăa]m(?:\s*\d{4}(?!\d))?)?", re.I),
+    re.compile(r"(?:ng[àa]y\s*)?(?<!\d)\d{1,2}\s*th[áa]ng\s*\d{1,2}(?:\s*n[ăa]m(?:\s*\d{4}(?!\d))?)?", re.I),
 )
 _YEAR_RE = re.compile(r"(?<!\d)(?:19|20|21)\d{2}(?!\d)")
 _PERIOD_PHRASES = tuple(
@@ -53,7 +53,7 @@ _PERIOD_PHRASES = tuple(
             tuple(fold_text(p).split())
             for p in (
                 "số cuối năm", "số đầu năm", "số cuối kỳ", "số đầu kỳ", "cuối năm", "đầu năm",
-                "năm nay", "năm trước", "kỳ này", "kỳ trước", "tại ngày",
+                "năm nay", "năm trước", "kỳ này", "kỳ trước", "tại ngày", "vào ngày", "tại", "ngày",
                 "cho năm tài chính kết thúc", "năm tài chính kết thúc", "cho năm", "năm",
             )
         ),
@@ -61,6 +61,15 @@ _PERIOD_PHRASES = tuple(
         reverse=True,
     )
 )
+# §6.7 unit spellings seen in the corpus that the shared parser does not read (the cleaner is not changed here).
+_DECLARATION_OCR = re.compile(r"\b(?:đơn|don)\s*(?:vị|vi)\s*(?:tính|tinh)\b", re.I)
+_DECLARATION = re.compile(
+    r"(?:(?:đơn|don)\s*(?:vị|vi)(?:\s*(?:tính|tinh))?|units?(?:\s+of\s+measurement)?|currency)\s*:\s*[^\n;]+", re.I
+)
+_VND_WORDS = re.compile(r"\b(?:đồng\s+việt\s+nam|việt\s+nam\s+đồng)\b", re.I)
+_GLUED_VND = re.compile(r"(?<=[^\W\d_])(?=VND\b)")
+_CONTINUED = re.compile(r"\(?\s*(?:tiếp\s+theo|continued)\s*\)?", re.I)
+_TRAILING_UNIT_WORDS = 3
 
 
 class MalformedTable(ValueError):
@@ -117,6 +126,14 @@ def _strip_periods(cell: str) -> str:
     return " ".join(kept)
 
 
+def _unit_spelling(text: str) -> str:
+    """Rewrite corpus unit spellings into forms the shared parser reads (§6.7)."""
+    text = unicodedata.normalize("NFC", text)
+    text = _DECLARATION_OCR.sub("Đơn vị tính", text)
+    text = _VND_WORDS.sub("VND", text)
+    return _GLUED_VND.sub(" ", text)
+
+
 def header_unit(cells: Sequence[str]) -> ParsedFinancialUnit:
     """Column unit from its header cells, nearest header row first (§6.7).
 
@@ -125,7 +142,7 @@ def header_unit(cells: Sequence[str]) -> ParsedFinancialUnit:
     found: ParsedFinancialUnit | None = None
     for cell in cells:
         cell = clean_text(cell)
-        remainder = _strip_periods(cell)
+        remainder = _strip_periods(_unit_spelling(cell))
         if not re.search(r"\w|%", remainder):
             continue
         parsed = parse_financial_unit("", column_header=remainder)
@@ -140,6 +157,29 @@ def header_unit(cells: Sequence[str]) -> ParsedFinancialUnit:
         ):
             return ParsedFinancialUnit(None, None, "unknown", "ambiguous", cell, "Conflicting header units")
     return found or _NO_UNIT
+
+
+def context_unit(context: str) -> ParsedFinancialUnit:
+    """Table unit from the text above the table (§6.7), after header and table-header units.
+
+    A declaration ("Đơn vị tính: …") is parsed as before. Otherwise a unit of at most three words
+    that ends the context right after its last date or year ("… năm 2016 Ngàn VND") is the unit.
+    ``source_text`` of a result is the declaration or the trailing unit, not the whole context.
+    """
+    original = clean_text(context or "")
+    text = _unit_spelling(original)
+    parsed = parse_financial_unit(text)
+    if parsed.unit_status != "unknown":
+        declaration = _DECLARATION.search(unicodedata.normalize("NFC", original))
+        return replace(parsed, source_text=declaration.group(0).strip() if declaration else original)
+    ends = [m.end() for pattern in (*_DATE_RES, _YEAR_RE) for m in pattern.finditer(text)]
+    if not ends:
+        return _NO_UNIT
+    tail = _CONTINUED.sub(" ", text[max(ends):]).strip(" .:;,-–()")
+    if not tail or len(tail.split()) > _TRAILING_UNIT_WORDS:
+        return _NO_UNIT
+    unit = parse_financial_unit("", column_header=tail)
+    return replace(unit, source_text=tail) if unit.unit_status == "valid" else _NO_UNIT
 
 
 @dataclass(frozen=True)
@@ -320,7 +360,7 @@ class TableView:
             unit = header_unit(tuple(reversed(cells)))
             if unit.unit_status == "unknown":
                 table_unit = self._analyzer.table_unit
-                unit = table_unit if table_unit.unit_status != "unknown" else self._analyzer.context_unit
+                unit = table_unit if table_unit.unit_status != "unknown" else context_unit(self.record.context)
             self._units[col_idx] = unit
         return self._units[col_idx]
 

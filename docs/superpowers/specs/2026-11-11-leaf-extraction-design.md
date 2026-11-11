@@ -300,14 +300,27 @@ report_year=doc.report_year)`.
   time, nearest row first. From each cell, dates (`dd.mm.yyyy`, `dd/mm/yyyy`, `dd-mm-yyyy`,
   "ngày d tháng m [năm yyyy]"), four-digit years and the period phrases (`số cuối năm`,
   `số đầu năm`, `số cuối kỳ`, `số đầu kỳ`, `cuối năm`, `đầu năm`, `năm nay`, `năm trước`,
-  `kỳ này`, `kỳ trước`, `tại ngày`, `cho năm tài chính kết thúc`, `năm tài chính kết thúc`,
-  `cho năm`, `năm`) are removed; an empty remainder is skipped; the remainder is parsed with
+  `kỳ này`, `kỳ trước`, `tại ngày`, `vào ngày`, `tại`, `ngày`, `cho năm tài chính kết thúc`,
+  `năm tài chính kết thúc`, `cho năm`, `năm`) are removed; dates may omit the leading "ngày"
+  ("31 tháng 12 năm 2025"); an empty remainder is skipped; the remainder is parsed with
   `parse_financial_unit("", column_header=remainder)`. The first `valid` unit is the column
   unit; a later cell with a different `valid` unit, or an `ambiguous` cell, makes the unit
   `ambiguous`. Probe results after stripping: "2023 VND" → VND ×1; "Số cuối năm Triệu đồng" →
   VND ×10^6; "31.12.2022Triệu VND" → VND ×10^6.
-- **No column unit:** then `TableAnalyzer.table_unit` (header text of the whole table), then
-  `parse_financial_unit(record.context)` (a declaration such as "Đơn vị tính: triệu đồng").
+- **No column unit:** then `TableAnalyzer.table_unit` (header text of the whole table), then the
+  context unit (`context_unit(record.context)`):
+  - a declaration such as "Đơn vị tính: triệu đồng", parsed by `parse_financial_unit`;
+  - otherwise a unit of at most three words that ends the context right after its last date
+    or year, with "(tiếp theo)" ignored. This is the Big-4 layout where the unit is a line of
+    its own above the table: "… vào ngày 31 tháng 12 năm 2016 VND", "… năm 2017 Ngàn VND".
+  - `source_text` is the declaration or the trailing unit, not the whole context.
+- **Corpus spellings (headers and context):** before parsing,
+  - an OCR-mixed "Đơn vị tinh" is read as "Đơn vị tính";
+  - "đồng Việt Nam" or "Việt Nam đồng" is read as VND;
+  - a "VND" glued to the word before it ("Số cuối nămVND") is split off.
+- **Measured effect:** on 2026-11-11 this was measured over the 586 corporate reports that had
+  `UnitUnknown(missing)`. 6,415 of 9,120 such requests became Found. No Found outcome changed,
+  and no report's scales disagreed.
 - Required: `unit_status == "valid"` and
   - `dimension: money` → `unit_kind == "monetary"` and `currency == "VND"`;
   - `dimension: money_per_share` → `unit_kind == "monetary"`, `currency == "VND"`,
