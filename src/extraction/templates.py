@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, get_args
 
 import yaml
@@ -34,11 +35,32 @@ def _normalize(ticker: object) -> str | None:
     return ticker.strip().upper() or None
 
 
+class _DuplicateKey(Exception):
+    def __init__(self, ticker: str):
+        super().__init__(ticker)
+        self.ticker = ticker
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects repeated mapping keys (PyYAML keeps the last silently)."""
+
+    def construct_mapping(self, node, deep=False):
+        seen: set[str] = set()
+        for key_node, _ in node.value:
+            if isinstance(key_node, yaml.ScalarNode):
+                key = _normalize(self.construct_object(key_node, deep=True))
+                if key is not None:
+                    if key in seen:
+                        raise _DuplicateKey(key)
+                    seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 class TickerTemplates:
-    """Immutable ticker -> template lookup; tickers are upper-cased."""
+    """Read-only ticker -> template lookup; tickers are upper-cased."""
 
     def __init__(self, mapping: Mapping[str, ExtractionTemplate]):
-        self._mapping = {_normalize(k) or str(k): v for k, v in mapping.items()}
+        self._mapping = MappingProxyType({_normalize(k) or str(k): v for k, v in mapping.items()})
 
     def get(self, ticker: str) -> ExtractionTemplate | None:
         key = _normalize(ticker)
@@ -57,7 +79,9 @@ def load_ticker_templates(path: Path = DEFAULT_TICKER_TEMPLATES) -> TickerTempla
     if not path.is_file():
         raise TemplateConfigError(name, "-", "missing file")
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        data = yaml.load(path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)  # noqa: S506 (SafeLoader subclass)
+    except _DuplicateKey as dup:
+        raise TemplateConfigError(name, dup.ticker, "duplicate ticker") from None
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
         raise TemplateConfigError(name, "-", f"invalid yaml ({type(exc).__name__})") from None
     except OSError as exc:

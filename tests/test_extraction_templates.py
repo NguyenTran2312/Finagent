@@ -32,6 +32,7 @@ class TickerTemplatesTests(unittest.TestCase):
 
     def test_errors(self):
         cases = {"- ACB\n": "-", "ACB: retail\n": "ACB", "ACB: bank\nacb: bank\n": "ACB",
+                 "ACB: bank\nACB: bank\n": "ACB", "ACB: bank\nACB: corporate\n": "ACB",
                  "'  ': bank\n": "?", "1: bank\n": "?", "": "-", "ACB: 5\n": "ACB",
                  "acb: [bank]\n": "ACB", "ACB: [unclosed\n": "-"}
         for text, ticker in cases.items():
