@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
@@ -33,11 +34,13 @@ def record(
 
 
 class _InMemorySession:
-    def __init__(self, docs, tables):
-        self._docs = docs
-        self._tables = tables
+    def __init__(self, store: InMemoryReportStore):
+        self._docs = store._docs
+        self._tables = store._tables
+        self._store = store
 
     def documents(self, ticker: str, year: int) -> list[ReportDoc]:
+        self._store.documents_queried.append((ticker, year))
         want = ticker.strip().upper()
         found = [d for d in self._docs if d.ticker == want and d.report_year == year]
         return sorted(
@@ -46,6 +49,7 @@ class _InMemorySession:
         )
 
     def tables(self, doc_id: str) -> list[TableRecord]:
+        self._store.tables_read[doc_id] += 1
         return sorted(self._tables.get(doc_id, ()), key=lambda t: (t.page, t.table_id))
 
 
@@ -54,11 +58,13 @@ class InMemoryReportStore:
         self._docs = list(docs)
         self._tables = {k: list(v) for k, v in tables.items()}
         self.sessions_opened = 0
+        self.documents_queried: list[tuple[str, int]] = []  # (ticker, year) as passed
+        self.tables_read: Counter[str] = Counter()  # doc_id -> tables() calls
 
     @contextmanager
     def session(self) -> Iterator[_InMemorySession]:
         self.sessions_opened += 1
-        yield _InMemorySession(self._docs, self._tables)
+        yield _InMemorySession(self)
 
 
 # --- Table fixtures (Task 4). Rows marked "real" are copied from the corpus; others are synthetic.
