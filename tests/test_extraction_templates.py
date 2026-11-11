@@ -1,5 +1,7 @@
+import importlib.util
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from src.extraction.templates import (
@@ -68,6 +70,43 @@ class TickerTemplatesTests(unittest.TestCase):
     def test_default_path(self):
         self.assertEqual(DEFAULT_TICKER_TEMPLATES.name, "ticker_templates.yaml")
         self.assertEqual(DEFAULT_TICKER_TEMPLATES.parent.name, "config")
+
+    def test_real_config_loads(self):
+        t = load_ticker_templates()
+        self.assertEqual(t.get("ACB"), "bank")
+        self.assertEqual(t.get("VJC"), "corporate")
+
+
+def _load_lint():
+    path = Path(__file__).resolve().parents[1] / "scripts" / "lint_ticker_templates.py"
+    spec = importlib.util.spec_from_file_location("lint_ticker_templates", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class LintReviewedTests(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+
+    def test_reviewed_rule(self):
+        lint = _load_lint()
+        path = Path(self._dir.name) / "t.yaml"
+        path.write_text(
+            "ACB: bank  # form codes seen: bank 1/1\n"
+            "BVH: insurance  # form codes seen: corporate 1/1  # reviewed: insurer\n"
+            "ASM: corporate  # form codes seen: none  # reviewed: non-financial\n"
+            "VJC: bank  # form codes seen: corporate 1/1\n"
+            "HPG: corporate\n", encoding="utf-8")
+        d = lambda **k: (Counter(k), Counter(docs=1))
+        result = {"ACB": d(bank=1), "BVH": d(corporate=1), "ASM": (Counter(), Counter(docs=1)),
+                  "VJC": d(corporate=1), "HPG": (Counter(), Counter(docs=1)),
+                  "NEW": d(corporate=1)}
+        problems, notes = lint.lint(result, path)
+        self.assertEqual([n.split(":")[0] for n in notes], ["ASM", "BVH"])
+        self.assertEqual([p.split(":")[0] for p in problems], ["HPG", "NEW", "VJC"])
+        self.assertIn("missing from config", problems[1])
 
 
 if __name__ == "__main__":
