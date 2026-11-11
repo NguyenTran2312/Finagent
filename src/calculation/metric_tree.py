@@ -333,6 +333,10 @@ class MetricTree:
         yield from (d for (t, _), d in self._leaves.items() if t == template)
         yield from (n for n in self._derived.values() if template in n.templates)
 
+    def leaves(self, template: Template) -> tuple[LeafDef, ...]:
+        """Leaves of `template` in YAML definition order."""
+        return tuple(d for (t, _), d in self._leaves.items() if t == template)
+
     def leaf(self, id: str, template: Template) -> LeafDef:
         try:
             return self._leaves[(template, id)]

@@ -1,3 +1,4 @@
+import itertools
 import unittest
 from decimal import Decimal as D
 
@@ -193,6 +194,27 @@ class FactSetTests(unittest.TestCase):
         d = fact("1100", scale="1")  # vs b: diff 100 <= 1? no -> conflict
         with self.assertRaises(FactConflict):
             FactSet([a, b, d])
+
+    def test_order_independent_all_pairs(self):
+        x = fact("1000", scale="1")
+        y = fact("1800", scale="1000")
+        z = fact("2500", scale="1000")  # |z - x| = 1500 > 1000
+        for order in itertools.permutations([x, y, z]):
+            with self.subTest(order=[f.value.value for f in order]):
+                with self.assertRaises(FactConflict):
+                    FactSet(order)
+
+    def test_order_independent_kept_fact(self):
+        a, b, c = fact("1000", scale="1000"), fact("1000", scale="1"), fact("1000.4", scale="1000")
+        for order in itertools.permutations([a, b, c]):
+            self.assertIs(FactSet(order).get(a.key), b)
+
+    def test_one_restated_among_three_wins(self):
+        r = fact("9000", restated=True)
+        for order in itertools.permutations([fact("1000"), fact("1000"), r]):
+            s = FactSet(order)
+            self.assertIs(s.get(r.key), r)
+            self.assertEqual(len(s.warnings), 1)
 
     def test_opening_is_prior_closing(self):
         prior = fact(year=2023)

@@ -103,42 +103,56 @@ def _describe(key: FactKey) -> str:
     )
 
 
-def _resolve(kept: Fact, new: Fact, warnings: list[str]) -> Fact:
-    """Apply the D1 conflict rules to the currently kept fact and the next one."""
-    key = kept.key
-    if kept.value.dimension is not new.value.dimension:
-        raise FactConflict(
-            f"dimension mismatch for {_describe(key)}: "
-            f"{kept.value.dimension} vs {new.value.dimension}"
-        )
-    tolerance = max(kept.source.scale, new.source.scale)
-    beyond = abs(kept.value.value - new.value.value) > tolerance
-
-    if kept.restated != new.restated:
-        winner = kept if kept.restated else new
-        warnings.append(f"restated value used for {_describe(key)}")
-        return winner
-    if beyond:
-        raise FactConflict(
-            f"conflicting facts for {_describe(key)}: "
-            f"{kept.value.value} ({kept.source.chunk_id}) vs "
-            f"{new.value.value} ({new.source.chunk_id})"
-        )
-    if new.source.scale < kept.source.scale:
-        return new
+def _finest(group: list[Fact]) -> Fact:
+    """Smallest printed scale; exact ties keep the first in input order."""
+    kept = group[0]
+    for fact in group[1:]:
+        if fact.source.scale < kept.source.scale:
+            kept = fact
     return kept
+
+
+def _require_agreement(key: FactKey, group: list[Fact]) -> None:
+    """Every pair must agree within the larger of the two printed scales."""
+    for i, left in enumerate(group):
+        for right in group[i + 1:]:
+            tolerance = max(left.source.scale, right.source.scale)
+            if abs(left.value.value - right.value.value) > tolerance:
+                raise FactConflict(
+                    f"conflicting facts for {_describe(key)}: "
+                    f"{left.value.value} ({left.source.chunk_id}) vs "
+                    f"{right.value.value} ({right.source.chunk_id})"
+                )
+
+
+def _resolve_group(key: FactKey, group: list[Fact], warnings: list[str]) -> Fact:
+    """Resolve all facts of one key; independent of input order except exact ties."""
+    first = group[0]
+    for fact in group[1:]:
+        if fact.value.dimension is not first.value.dimension:
+            raise FactConflict(
+                f"dimension mismatch for {_describe(key)}: "
+                f"{first.value.dimension} vs {fact.value.dimension}"
+            )
+    restated = [f for f in group if f.restated]
+    if len(restated) == 1:
+        if len(group) > 1:
+            warnings.append(f"restated value used for {_describe(key)}")
+        return restated[0]
+    candidates = restated or group
+    _require_agreement(key, candidates)
+    return _finest(candidates)
 
 
 class FactSet:
     def __init__(self, facts: Iterable[Fact]) -> None:
-        by_key: dict[FactKey, Fact] = {}
-        warnings: list[str] = []
+        groups: dict[FactKey, list[Fact]] = {}
         for fact in facts:
             if not isinstance(fact, Fact):
                 raise TypeError("FactSet items must be Fact instances")
-            current = by_key.get(fact.key)
-            by_key[fact.key] = fact if current is None else _resolve(current, fact, warnings)
-        self._facts = by_key
+            groups.setdefault(fact.key, []).append(fact)
+        warnings: list[str] = []
+        self._facts = {key: _resolve_group(key, group, warnings) for key, group in groups.items()}
         self.warnings: tuple[str, ...] = tuple(warnings)
 
     def get(self, key: FactKey) -> Fact:

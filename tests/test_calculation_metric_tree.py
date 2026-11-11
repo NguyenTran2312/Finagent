@@ -39,6 +39,13 @@ def tree(derived_entries=(), leaves=None):
 
 
 class MetricTreeTests(unittest.TestCase):
+    def test_leaves_accessor(self):
+        tree = MetricTree.load()
+        ids = [leaf.id for leaf in tree.leaves("bank")]
+        self.assertEqual(ids[0], "interest_and_similar_income")
+        self.assertIn("customer_loans_gross", ids)
+        self.assertTrue(all(leaf.template == "corporate" for leaf in tree.leaves("corporate")))
+
     def test_valid_tree_and_expansion(self):
         t = tree([derived("r", ["a / ((c + c[t-1]) / 2)"])])
         self.assertEqual(t.required_leaves("r", "corporate", 2024), [frozenset({
