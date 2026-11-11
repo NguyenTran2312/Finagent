@@ -36,6 +36,11 @@ _ROMANS = frozenset(_roman(n) for n in range(1, 31))
 # A leading enumerator token: optional "(", the token, then punctuation ("VI.", "1.", "a)"), space or end.
 _ENUM_RE = re.compile(r"\(?(?P<tok>[IVX]+|\d{1,2}|[A-Za-z])(?:[.):]+\s*|\s+|$)")
 _CODE_DIGITS = re.compile(r"\d{1,3}")
+# A statement formula ending a label: "(270=100+200)", "(30 = 20 + (21 - 22) - (25 + 26))", OCR-cut "(270 =".
+_FORMULA_SUFFIX = re.compile(r"\s*\(\s*\d{1,3}\s*=[\d\s+\-–−()]*$")
+# A note-reference or row-number cell ("5", "5.1", "6.13", "18.2a", "18."): a column of only these, with no
+# period header, holds notes or row numbers, not values.
+_NOTE_REF = re.compile(r"\d{1,2}(?:\.\d{1,2}){0,2}[a-z]?\.?")
 _ITEM = re.compile(r"\d{1,2}")
 _LETTER = re.compile(r"[A-Za-z]")
 _RESTATED = ("trinh bay lai", "dieu chinh lai", "restated")
@@ -85,7 +90,7 @@ def normalize_label(text: str) -> str:
     The enumerator is decided on the raw token (uppercase roman I-XXX, 1-2 digits, one ASCII
     letter), so words that only fold to a roman numeral ("Xí nghiệp", "Vị thế") are kept.
     """
-    raw = clean_text(unicodedata.normalize("NFC", clean_text(text)))
+    raw = _FORMULA_SUFFIX.sub("", clean_text(unicodedata.normalize("NFC", clean_text(text))))
     match = _ENUM_RE.match(raw)
     if match and (match.group("tok") in _ROMANS or len(match.group("tok")) == 1 or match.group("tok").isdigit()):
         raw = raw[match.end():]
@@ -226,10 +231,21 @@ class TableView:
             tuple(c for c in (clean_text(self._cell(i, col)) for i in headers) if c) for col in range(n_cols)
         )
         self._headers = tuple(_join_header(cells) for cells in self._header_cells)
+        # Units come only from header rows above the first filled data row: rows the analyzer takes for
+        # headers further down (signature lines "Người lập biểu", mid-table labels "Phân bổ:") carry none.
+        first_data = next((r for r in self.data_rows if any(clean_text(c) for c in self._rows[r])), len(self._rows))
+        leading = [i for i in headers if i < first_data]
+        self._lead_header_cells = tuple(
+            tuple(c for c in (clean_text(self._cell(i, col)) for i in leading) if c) for col in range(n_cols)
+        )
+        self._table_unit = self._leading_table_unit(leading)
         # Space-insensitive so OCR-joined "Thuyếtminh" / "Mãsố" headers are recognised too.
         squashed = [fold_text(h).replace(" ", "") for h in self._headers]
-        note_cols = {col for col in range(n_cols) if "thuyetminh" in squashed[col]}
+        # A "Mã số Thuyết minh" cell spanning two columns is decided by content in _find_code_col.
+        note_cols = {col for col in range(n_cols) if "thuyetminh" in squashed[col] and "maso" not in squashed[col]}
         self.code_col = self._find_code_col(n_cols, squashed, note_cols)
+        note_cols |= {col for col in range(n_cols) if "thuyetminh" in squashed[col] and col != self.code_col}
+        note_cols |= {col for col in range(n_cols) if col != self.code_col and self._is_note_ref_col(col)}
         self._labels = tuple(row_label(row, code_idx=self.code_col) for row in self._rows)
         self._norm_labels = tuple(normalize_label(label) for label in self._labels)
         self.value_cols = tuple(
@@ -248,8 +264,15 @@ class TableView:
 
     def _find_code_col(self, n_cols: int, squashed: list[str], note_cols: set[int]) -> int | None:
         by_header = [c for c in range(n_cols) if "maso" in squashed[c] and c not in note_cols]
+        if len(by_header) > 1:
+            # One header cell over the code and the note column: the column with most code-like cells.
+            coded = {c: sum(_code_like(x) for x in (clean_text(self._cell(r, c)) for r in self.data_rows) if x)
+                     for c in by_header}
+            best = max(coded.values())
+            winners = [c for c, n in coded.items() if n == best]
+            return winners[0] if len(winners) == 1 and best >= 3 else None
         if by_header:
-            return by_header[0] if len(by_header) == 1 else None
+            return by_header[0]
         qualifying = []
         for col in range(n_cols):
             if col in note_cols:
@@ -259,6 +282,23 @@ class TableView:
             if coded >= 3 and coded >= 0.8 * len(cells):
                 qualifying.append(col)
         return qualifying[0] if len(qualifying) == 1 else None
+
+    def _leading_table_unit(self, leading: Sequence[int]) -> ParsedFinancialUnit:
+        """Table unit of the leading header rows: a declaration cell ("Đơn vị: VND"), else the joined text."""
+        cells = [c for row in leading for c in (clean_text(x) for x in self._rows[row]) if c]
+        declared = header_unit([c for c in cells if _DECLARATION.search(_DECLARATION_OCR.sub("Đơn vị tính", c))])
+        if declared.unit_status != "unknown":
+            return declared
+        text = " | ".join(" ".join(self._rows[row]) for row in leading)
+        return parse_financial_unit(table_header=text) if text.strip() else _NO_UNIT
+
+    def _is_note_ref_col(self, col: int) -> bool:
+        """Unlabelled note column: every filled cell a note reference, one dotted, no period in the header."""
+        cells = [c for c in (clean_text(self._cell(r, col)) for r in self.data_rows) if c]
+        if not cells or not all(_NOTE_REF.fullmatch(c) for c in cells) or not any("." in c for c in cells):
+            return False
+        info = period_info(fold_text(self.column_header(col)), report_year=self.report_year)
+        return info.year is None and info.role == PeriodRole.UNKNOWN
 
     def _has_conflicting_header_block(self, headers: Sequence[int]) -> bool:
         """True when a header block after the first data row re-labels a value column's period.
@@ -356,10 +396,10 @@ class TableView:
     # --- numbers and units (§6.6, §6.7) -----------------------------------
     def _unit(self, col_idx: int) -> ParsedFinancialUnit:
         if col_idx not in self._units:
-            cells = self._header_cells[col_idx] if col_idx < len(self._header_cells) else ()
+            cells = self._lead_header_cells[col_idx] if col_idx < len(self._lead_header_cells) else ()
             unit = header_unit(tuple(reversed(cells)))
             if unit.unit_status == "unknown":
-                table_unit = self._analyzer.table_unit
+                table_unit = self._table_unit
                 unit = table_unit if table_unit.unit_status != "unknown" else context_unit(self.record.context)
             self._units[col_idx] = unit
         return self._units[col_idx]

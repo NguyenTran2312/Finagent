@@ -212,11 +212,23 @@ report_year=doc.report_year)`.
      enumerator: a roman numeral I–XXX (letters I, V, X only), `^\d{1,2}$`, or a single letter;
   3. a column whose header contains `thuyet minh` never qualifies (note numbers "29", "6.1");
   4. two or more qualifying columns → the table has no code column.
+  5. One header cell may span both the code and the note column ("Mã số Thuyết minh", real
+     DCM 2020). When two or more columns carry `ma so`, the one with the most code-like data
+     cells (at least 3, no tie) is the code column. The others are note columns.
+- **Note columns:** columns whose header contains `thuyet minh`, plus columns found by
+  content. A content-found column is not the code column, every filled data cell is a note
+  reference or row number (`\d{1,2}(\.\d{1,2}){0,2}[a-z]?\.?`), at least one is dotted ("5.1",
+  "6.13", "18."), and its header has no year or period role. Unlabelled note and row-number
+  columns otherwise turn whole tables into `mixed` locale (real HUT, HPX, SNZ, OGC, DPM).
 - **Row label:** `row_label(row, code_idx=code_column)`.
 - **Normalised label:** `fold_text(label)` with one leading enumerator token removed (roman
-  numeral I–XXX, 1–2 digits, or a single letter). No other rewriting.
-- **Value columns:** columns other than the code and `thuyet minh` columns with at least one
-  data cell that parses as a number.
+  numeral I–XXX, 1–2 digits, or a single letter) and a trailing statement formula removed
+  ("(270=100+200)", "(30 = 20 + (21 - 22) - (25 + 26))", OCR-cut "(270 ="). No other rewriting.
+- **Value columns:** columns other than the code and note columns with at least one data cell
+  that parses as a number.
+- **Measured effect (2026-11-11, 100 gold questions, 663 leaf operands, rules only):** correct
+  went from 580 to 628. The one wrong value is fixed: DCM 2020 total assets had been read from a
+  subsidiary note through the anchor rule.
 - **Number locale:** `vi` if the table's value cells include at least one cell that parses only
   under `vi` and none that parses only under `en`; `en` for the reverse; `mixed` if both
   occur; `vi` if neither occurs (all cells unambiguous).
@@ -307,8 +319,14 @@ report_year=doc.report_year)`.
   unit; a later cell with a different `valid` unit, or an `ambiguous` cell, makes the unit
   `ambiguous`. Probe results after stripping: "2023 VND" → VND ×1; "Số cuối năm Triệu đồng" →
   VND ×10^6; "31.12.2022Triệu VND" → VND ×10^6.
-- **No column unit:** then `TableAnalyzer.table_unit` (header text of the whole table), then the
-  context unit (`context_unit(record.context)`):
+- **Leading header rows only:** column and table units come from the header rows above the first
+  filled data row. `TableAnalyzer` also takes rows further down for headers, such as signature
+  lines ("Người lập biểu", read as a count unit, real GAS 2018) and mid-table labels ("Phân bổ:",
+  "Lãi trên cổ phiếu"). Those rows carry no unit.
+- **No column unit:** then the table unit of the leading header rows. A header cell with a
+  declaration ("Đơn vị: VND" sitting over another column, real FPT 2018) wins; otherwise the
+  joined leading header text is used. After that comes the context unit
+  (`context_unit(record.context)`):
   - a declaration such as "Đơn vị tính: triệu đồng", parsed by `parse_financial_unit`;
   - otherwise a unit of at most three words that ends the context right after its last date
     or year, with "(tiếp theo)" ignored. This is the Big-4 layout where the unit is a line of

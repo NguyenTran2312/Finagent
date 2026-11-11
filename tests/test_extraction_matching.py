@@ -313,6 +313,27 @@ class CandidateTableTests(unittest.TestCase):
         hits = find_rows(tree.leaf("net_interest_income", "bank"), views, bank)
         self.assertEqual([h.view.record.table_id for h in hits], [acb_is_view().record.table_id])
 
+    def test_dcm_total_assets_from_balance_sheet_not_subsidiary_note(self):  # real DCM 2020 wrong value
+        bs = view([["", "TÀI SẢN", "Mã số Thuyết minh", "Mã số Thuyết minh", "Số cuối năm", "Số đầu năm"],
+                   ["A.", "TÀI SẢN NGẮN HẠN", "100", "", "3.978.192.126.939", "4.250.036.958.838"],
+                   ["I.", "Tiền và các khoản tương đương tiền", "110", "4", "509.995.350.873", "471.173.323.541"],
+                   ["B.", "TÀI SẢN DÀI HẠN", "200", "", "4.739.288.564.672", "5.922.557.793.908"],
+                   ["", "TỔNG CỘNG TÀI SẢN (270=100+200)", "270", "", "8.717.480.691.611", "10.172.594.752.746"]],
+                  kind="balance_sheet", table_id=5, page=10, year=2020)
+        nci_note = view([["", "Số cuối nămVND", "Số đầu nămVND"],
+                         ["Tổng tài sản", "50.688.973.610", "67.941.730.594"],
+                         ["Tổng nợ phải trả", "(24.341.547.506)", "(40.663.837.246)"],
+                         ["Tài sản thuần", "26.347.426.104", "27.277.893.348"],
+                         ["Vốn điều lệ", "23.503.490.000", "23.503.490.000"]],
+                        kind="note", table_id=37, page=37, year=2020)
+        hits = find_rows(tree.leaf("total_assets", "corporate"), [bs, nci_note], corp)
+        self.assertEqual([(h.view.record.table_id, h.method) for h in hits], [(5, "code")])
+
+    def test_formula_suffix_label_matches(self):
+        bs = view([["Chỉ tiêu", "Số cuối năm"], ["TỔNG CỘNG TÀI SẢN (270=100+200)", "8.717"]], kind="balance_sheet")
+        self.assertEqual(labels_of(find_rows(tree.leaf("total_assets", "corporate"), [bs], corp)),
+                         ["TỔNG CỘNG TÀI SẢN (270=100+200)"])
+
     def test_tagged_hit_suppresses_anchor_tables(self):
         tagged = TableView(record("ACB22C", 9, 20, ACB_IS_2022_AS_NOTE, kind="income_statement"), 2022)
         views = [acb_is_view(kind="note"), tagged]

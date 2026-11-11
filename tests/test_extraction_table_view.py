@@ -145,6 +145,24 @@ class TableViewTests(unittest.TestCase):
                 r = view(rows, kind="balance_sheet", context=context).read(1, 2, Dimension.MONEY)
                 self.assertEqual((r.status, r.reason), ("unit", "missing"))
 
+    def test_unit_declared_in_another_header_cell(self):  # real FPT 2018: "Đơn vị: VND" sits over the next column
+        rows = [["", "TÀI SẢN", "Mã số", "Số cuối năm", "Đơn vị: VND Số đầu năm"],
+                ["A.", "TÀI SẢN NGẮN HẠN", "100", "18.406.087.226.041", "16.059.937.820.645"],
+                ["", "TỔNG CỘNG TÀI SẢN (270=100+200)", "270", "29.757.067.149.568", "23.884.267.040.722"]]
+        r = view(rows, year=2018, kind="balance_sheet").read(2, 3, Dimension.MONEY)
+        self.assertEqual((r.status, r.source.scale, r.source.unit_text), ("ok", D(1), "Đơn vị: VND Số đầu năm"))
+
+    def test_header_rows_below_data_carry_no_unit(self):  # real GAS 2018: signature rows ("Người lập") at the bottom
+        rows = [["CHỈ TIÊU", "Mã số", "Năm nay", "Năm trước"],
+                ["1. Doanh thu bán hàng", "01", "75.976.345.569.671", "64.830.157.981.142"],
+                ["3. Doanh thu thuần (10=01-02)", "10", "75.611.546.239.412", "64.500.000.000.000"],
+                ["Đặng Thị Hồng Yên Người lập biểu", "Trần Thị Hoàng Anh Kế toán",
+                 "Dương Mạnh Sơn Tổng Giám đốc", "Dương Mạnh Sơn Tổng Giám đốc"]]
+        v = view(rows, year=2018, kind="income_statement", context="BÁO CÁO KẾT QUẢ năm 2018 Đơn vị: VND")
+        self.assertEqual(v._analyzer.header_indices, (0, 3))  # the signature row is taken for a header row
+        r = v.read(2, 2, Dimension.MONEY)
+        self.assertEqual((r.status, r.source.scale, r.source.unit_text), ("ok", D(1), "Đơn vị: VND"))
+
     def test_header_unit_beats_context_unit(self):
         rows = [["Mã số", "TÀI SẢN", "Số cuối năm Triệu VND"], ["100", "TÀI SẢN NGẮN HẠN", "1.234"]]
         r = view(rows, context="BẢNG CÂN ĐỐI KẾ TOÁN ngày 31 tháng 12 năm 2016 VND").read(1, 2, Dimension.MONEY)
@@ -169,7 +187,52 @@ class TableViewTests(unittest.TestCase):
         two = [[r[0], r[0] if i else "", r[1], r[2]] for i, r in enumerate(two)]
         self.assertIsNone(view(two).code_col)  # two qualifying columns
 
+    def test_merged_code_and_note_header(self):  # real DCM 2020 balance sheet: one cell spans both columns
+        rows = [["", "TÀI SẢN", "Mã số Thuyết minh", "Mã số Thuyết minh", "Số cuối năm", "Số đầu năm"],
+                ["A.", "TÀI SẢN NGẮN HẠN", "100", "", "3.978.192.126.939", "4.250.036.958.838"],
+                ["I.", "Tiền và các khoản tương đương tiền", "110", "4", "509.995.350.873", "471.173.323.541"],
+                ["1.", "Tiền", "111", "", "209.995.350.873", "171.173.323.541"],
+                ["", "TỔNG CỘNG TÀI SẢN (270=100+200)", "270", "", "8.717.480.691.611", "10.172.594.752.746"]]
+        v = view(rows, kind="balance_sheet")
+        self.assertEqual((v.code_col, v.value_cols), (2, (4, 5)))
+        self.assertEqual(v.code(4), "270")
+        # Two merged columns with equally many code-like cells stay undecided.
+        tie = [r[:3] + [r[2]] + r[4:] for r in rows]
+        self.assertIsNone(view(tie, kind="balance_sheet").code_col)
+
+    def test_note_reference_column_by_content(self):  # real HUT/SNZ: unlabelled note column "5.1", "5.13"
+        rows = [["", "TÀI SẢN", "", "31/12/2019 VND", "01/01/2019 VND"],
+                ["100", "TÀI SẢN NGẮN HẠN", "", "2.311.130.883.461", "2.117.560.373.052"],
+                ["110", "Tiền và các khoản tương đương tiền", "5.1", "146.076.986.910", "142.526.664.337"],
+                ["130", "Các khoản phải thu ngắn hạn", "5.13", "115.602.160.741", "45.772.170.869"],
+                ["140", "Hàng tồn kho", "5.2", "1.234.567", "2.345.678"]]
+        v = view(rows, year=2019, kind="balance_sheet")
+        self.assertEqual((v.value_cols, v.locale), ((3, 4), "vi"))
+        r = v.read(2, 3, Dimension.MONEY)
+        self.assertEqual((r.status, r.value.value), ("ok", D("146076986910")))
+        # A column with a period header is a value column even when its cells look like note numbers.
+        decimals = [r[:2] + [r[3]] for r in rows]
+        decimals = [decimals[0]] + [[a, b, c] for a, b, c in
+                                    (("100", "Tài sản", "5.1"), ("110", "Tiền", "5.13"), ("130", "Phải thu", "5.2"),
+                                     ("140", "Hàng tồn kho", "6.1"))]
+        self.assertEqual(view(decimals, year=2019, kind="balance_sheet").value_cols, (2,))
+        # Real DPM 2021: a row-number column "1.", "2.", "18.1", "18.2" left of the labels.
+        numbered = [["", "CHỈ TIÊU", "Mã số", "Thuyết minh", "Năm nay", "Năm trước"],
+                    ["1.", "Doanh thu bán hàng", "01", "25", "12.786.141.193.352", "7.761.818.604.563"],
+                    ["2.", "Giá vốn hàng bán", "11", "26", "9.100.000.000.000", "6.000.000.000.000"],
+                    ["18.", "Lợi nhuận sau thuế", "60", "", "3.171.516.300.559", "1.000.000.000.000"],
+                    ["18.1", "Lợi nhuận sau thuế của Công ty mẹ", "61", "", "3.000.000.000.000", "900.000.000.000"],
+                    ["18.2", "Lợi nhuận sau thuế của cổ đông không kiểm soát", "62", "", "171.516.300.559", "1"]]
+        v = view(numbered, year=2021, kind="income_statement")
+        self.assertEqual((v.code_col, v.value_cols, v.locale), (2, (4, 5), "vi"))
+
     def test_normalize_label_and_levels(self):
+        for raw in ("TỔNG CỘNG TÀI SẢN (270=100+200)", "Tổng cộng tài sản (270 = 100 + 200)",
+                    "TỔNG CỘNG TÀI SẢN (270 ="):  # OCR-truncated formula
+            self.assertEqual(normalize_label(raw), "tong cong tai san", raw)  # trailing formula dropped
+        self.assertEqual(normalize_label("Lợi nhuận thuần từ hoạt động kinh doanh (30 = 20 + (21 - 22) - (25 + 26))"),
+                         "loi nhuan thuan tu hoat dong kinh doanh")
+        self.assertEqual(normalize_label("Vay (ngắn hạn)"), "vay ngan han")  # ordinary parentheses kept
         self.assertEqual(normalize_label("VI Cho vay khách hàng"), "cho vay khach hang")
         self.assertEqual([enumerator_level(c) for c in ("A", "VI", "X", "2", "b", "6.1")],
                          ["top", "section", "section", "item", "sub_item", None])
