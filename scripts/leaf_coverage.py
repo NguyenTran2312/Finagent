@@ -126,7 +126,19 @@ def main(argv: list[str] | None = None) -> int:
     extractor = LeafExtractor(store, tree, templates, fallback=None)
     kinds = KindLookup(store)
 
-    keys = [k for k in report_keys(args.db, args.years) if templates.get(k[0]) in TEMPLATES and k[2] in SCOPES]
+    keys, skipped = [], Counter()
+    for k in report_keys(args.db, args.years):
+        template = templates.get(k[0])
+        if template is None:
+            skipped["no_template"] += 1
+        elif template not in TEMPLATES:
+            skipped["template_other"] += 1
+        elif k[2] == "unknown":
+            skipped["unknown_scope"] += 1
+        elif k[2] not in SCOPES:
+            skipped["other_scope"] += 1
+        else:
+            keys.append(k)
     print(f"{len(keys)} (ticker, year, scope) reports; leaves: "
           + ", ".join(f"{t}={len(v)}" for t, v in leaves.items()), file=sys.stderr)
 
@@ -134,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     reasons: dict[str, Counter] = {t: Counter() for t in TEMPLATES}
     warnings: dict[str, Counter] = {t: Counter() for t in TEMPLATES}
     methods: dict[str, Counter] = {t: Counter() for t in TEMPLATES}
-    anchor: dict[str, Counter] = {t: Counter() for t in TEMPLATES}  # "hits" / "anchor"
+    anchor: dict[str, Counter] = {t: Counter() for t in TEMPLATES}  # "hits" / "statement_hits" / "anchor"
     failures: Counter = Counter()
     out_fh = args.out.open("w", encoding="utf-8", newline="") if args.out else None
     writer = csv.writer(out_fh) if out_fh else None
@@ -169,12 +181,15 @@ def main(argv: list[str] | None = None) -> int:
                     methods[template][method] += 1
                     anchor[template]["hits"] += 1
                     if leaf.source == "statement":
+                        anchor[template]["statement_hits"] += 1
                         table_kind = kinds.kind(source.doc_id, source.chunk_id)
                         via_anchor = str(table_kind != leaf.statement_kind)
                         anchor[template]["anchor"] += table_kind != leaf.statement_kind
                 if writer:
                     writer.writerow((template, ticker, year, scope, leaf.id, name, reason, method,
                                      ";".join(warns), doc_id, via_anchor))
+            if out_fh:
+                out_fh.flush()
             if n % 25 == 0 or n == len(keys):
                 print(f"[{n}/{len(keys)}] {ticker} {year} {scope} "
                       f"({time.monotonic() - started:.0f}s)", file=sys.stderr)
@@ -185,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     names = sorted({n for c in outcomes.values() for n in c})
     print(f"# Leaf coverage ({args.db.name}, years {args.years.start}-{args.years.stop - 1}, "
           f"fallback=None)\n")
-    print(f"Reports processed: {len(keys)}; run time {time.monotonic() - started:.0f}s\n")
+    print(f"Reports processed: {len(keys)}; run time {time.monotonic() - started:.0f}s")
+    print("Reports skipped: " + ", ".join(
+        f"{r}={skipped[r]}" for r in ("unknown_scope", "other_scope", "template_other", "no_template"))
+        + "\n")
     for template in TEMPLATES:
         total = Counter()
         print(f"## {template}\n")
@@ -206,11 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nWarning codes ({template}):")
         for key, count in warnings[template].most_common(TOP_REASONS):
             print(f"- {key}: {count}")
-        hits = anchor[template]["hits"]
+        statement_hits = anchor[template]["statement_hits"]
         print(f"\nMethods of hits ({template}): "
               + (", ".join(f"{k} {v}" for k, v in methods[template].most_common()) or "none"))
-        print(f"Hits read through the anchor rule ({template}): {anchor[template]['anchor']} "
-              f"of {hits} (statement leaves only; source table kind differs from the leaf's)\n")
+        print(f"Hits whose source table kind differs from the leaf's, approximating anchor-rule use "
+              f"({template}): {anchor[template]['anchor']} of {statement_hits} statement-leaf hits\n")
     if failures:
         print("## Failures\n")
         for message, count in failures.most_common():

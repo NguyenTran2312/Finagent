@@ -79,15 +79,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc.args[0]))
     request = LeafRequest(leaf.id, args.year, leaf.period_kind)
 
+    try:
+        client = build_client()
+    except Exception as exc:
+        raise SystemExit(f"build_client failed: {type(exc).__name__}") from None
     store = SqliteReportStore(args.db)
     plain = LeafExtractor(store, tree, templates).extract(args.ticker, args.scope, [request])
     print("deterministic:", plain.outcomes[0])
     locator = LlmCellLocator(
-        structured_pointer_adapter(build_client()),
+        structured_pointer_adapter(client),
         llm_errors=DEFAULT_LLM_ERRORS + extra_errors,
     )
-    with_llm = LeafExtractor(store, tree, templates, fallback=locator).extract(
-        args.ticker, args.scope, [request])
+    try:
+        with_llm = LeafExtractor(store, tree, templates, fallback=locator).extract(
+            args.ticker, args.scope, [request])
+    except Exception as exc:
+        raise SystemExit(f"llm extract failed: {type(exc).__name__}") from None
     print("with fallback:", with_llm.outcomes[0])
     return 0
 
