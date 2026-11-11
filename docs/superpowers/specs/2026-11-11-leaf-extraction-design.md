@@ -1,7 +1,7 @@
 # Leaf Extraction (Statement Line Items → Sourced Facts) — Design
 
 Date: 2026-11-11
-Status: draft for review
+Status: approved; implemented on feat/leaf-extraction
 Sub-project: 2 of 4 of "answering and serving"
 Builds on: `docs/superpowers/specs/2026-11-10-calculation-core-design.md` (branch
 `feat/calculation-core`, PR #2), especially §6, §8 and §16.
