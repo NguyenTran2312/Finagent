@@ -17,6 +17,7 @@ from tests.extraction_fixtures import (
     acb_is_view,
     record,
     row_of,
+    segment_view,
     view_with_cell,
     vjc_view,
 )
@@ -130,6 +131,15 @@ class TableViewTests(unittest.TestCase):
         self.assertEqual(normalize_label("12. Tiền"), "tien")
         self.assertEqual(normalize_label("Tiền gửi"), "tien gui")
         self.assertEqual(normalize_label("I II Tiền"), "ii tien")  # one token only
+        self.assertEqual(normalize_label("Xí nghiệp A"), "xi nghiep a")  # raw token decides
+        self.assertEqual(normalize_label("Vị thế ngoại tệ"), "vi the ngoai te")
+        self.assertEqual(normalize_label("Á Châu"), "a chau")
+        self.assertEqual(normalize_label("vi phạm"), "vi pham")  # lower-case roman is not a section
+        for raw in ("VI. Cho vay", "1. Cho vay", "a) Cho vay", "(b) Cho vay", "1.Cho vay", "x Cho vay"):
+            self.assertEqual(normalize_label(raw), "cho vay", raw)
+        self.assertEqual(normalize_label("XXXI Cho vay"), "xxxi cho vay")
+        self.assertEqual(normalize_label("123 Cho vay"), "123 cho vay")
+        self.assertEqual(normalize_label("A"), "")
         self.assertEqual([enumerator_level(c) for c in ("I", "V", "XXX", "XXXI", "123", "")],
                          ["section", "section", "section", None, None, None])
         v = acb_bs_view()
@@ -176,6 +186,34 @@ class TableViewTests(unittest.TestCase):
         self.assertEqual(v.period_columns(2023, "flow", "primary"), ())
         self.assertEqual(v.period_columns(2023, "closing", "primary"), ())
         self.assertEqual(v.period_columns(2022, "flow", "fallback"), ())
+
+    def test_multi_block_header_fails_safe(self):
+        rows = [["Chỉ tiêu", "Năm 2022", "Năm 2022"], ["Doanh thu", "1.000", "2.000"],
+                ["Chỉ tiêu", "Năm 2021", "Năm 2021"], ["Doanh thu", "900", "1.900"]]
+        v = view(rows, year=2022)
+        self.assertEqual(v.period_columns(2022, "flow", "primary"), ())
+        self.assertEqual(v.period_columns(2021, "flow", "fallback"), ())
+        seg = segment_view()  # real ACB segment note: header blocks between data rows
+        self.assertEqual(seg.period_columns(2022, "closing", "primary"), ())
+
+    def test_repeated_header_block_still_works(self):
+        head = ["Chỉ tiêu", "Năm nay", "Năm trước"]
+        rows = [head, ["Doanh thu", "1.000", "900"], list(head), ["Giá vốn", "800", "700"]]
+        v = view(rows)
+        self.assertEqual(v.period_columns(2023, "flow", "primary"), (1,))
+        self.assertEqual(v.period_columns(2022, "flow", "fallback"), (2,))
+
+    def test_mid_table_rows_without_period_cells_do_not_trigger(self):
+        section_with_year = ["Số dư tại ngày 31/12/2022", "", ""]
+        rows = [["Chỉ tiêu", "Năm nay", "Năm trước"], ["Doanh thu", "1.000", "900"], section_with_year,
+                ["Giá vốn", "800", "700"]]
+        self.assertEqual(view(rows).period_columns(2023, "flow", "primary"), (1,))
+        label = "LƯU CHUYỂN TIỀN TỪ HOẠT ĐỘNG ĐẦU TƯ"  # colspan-repeated section label (VJC 2023 cash flow)
+        rows = [["Mã số", "Chỉ tiêu", "Năm nay", "Năm trước"], ["01", "Lợi nhuận", "1.000", "900"],
+                [label] * 4, ["21", "Tiền chi mua sắm", "(100)", "(90)"]]
+        v = view(rows)
+        self.assertEqual(v.period_columns(2023, "flow", "primary"), (2,))
+        self.assertEqual(v.period_columns(2022, "flow", "fallback"), (3,))
 
     def test_continuation_table_without_header(self):  # spec §6.9
         v = view([["01", "Doanh thu thuần", "1.000", "900"]])

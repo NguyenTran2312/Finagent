@@ -33,7 +33,8 @@ def _roman(n: int) -> str:
 
 
 _ROMANS = frozenset(_roman(n) for n in range(1, 31))
-_ROMANS_FOLDED = frozenset(r.lower() for r in _ROMANS)
+# A leading enumerator token: optional "(", the token, then punctuation ("VI.", "1.", "a)"), space or end.
+_ENUM_RE = re.compile(r"\(?(?P<tok>[IVX]+|\d{1,2}|[A-Za-z])(?:[.):]+\s*|\s+|$)")
 _CODE_DIGITS = re.compile(r"\d{1,3}")
 _ITEM = re.compile(r"\d{1,2}")
 _LETTER = re.compile(r"[A-Za-z]")
@@ -70,11 +71,16 @@ class MalformedTable(ValueError):
 
 
 def normalize_label(text: str) -> str:
-    """Folded label with one leading enumerator token (roman I-XXX, 1-2 digits, one letter) removed."""
-    tokens = fold_text(text).split()
-    if tokens and (tokens[0] in _ROMANS_FOLDED or _ITEM.fullmatch(tokens[0]) or len(tokens[0]) == 1):
-        tokens = tokens[1:]
-    return " ".join(tokens)
+    """Folded label with one leading enumerator token removed.
+
+    The enumerator is decided on the raw token (uppercase roman I-XXX, 1-2 digits, one ASCII
+    letter), so words that only fold to a roman numeral ("Xí nghiệp", "Vị thế") are kept.
+    """
+    raw = clean_text(unicodedata.normalize("NFC", clean_text(text)))
+    match = _ENUM_RE.match(raw)
+    if match and (match.group("tok") in _ROMANS or len(match.group("tok")) == 1 or match.group("tok").isdigit()):
+        raw = raw[match.end():]
+    return fold_text(raw)
 
 
 def enumerator_level(code: str) -> Level | None:
@@ -192,6 +198,7 @@ class TableView:
             and any(self._parses(self._cell(r, col)) for r in self.data_rows)
         )
         self.locale = self._detect_locale()
+        self._multi_block = self._has_conflicting_header_block(headers)
         self._units: dict[int, ParsedFinancialUnit] = {}
 
     # --- structure -------------------------------------------------------
@@ -212,6 +219,38 @@ class TableView:
             if coded >= 3 and coded >= 0.8 * len(cells):
                 qualifying.append(col)
         return qualifying[0] if len(qualifying) == 1 else None
+
+    def _has_conflicting_header_block(self, headers: Sequence[int]) -> bool:
+        """True when a header block after the first data row re-labels a value column's period.
+
+        Only cells with period evidence (a year or a period role) are compared, so empty cells and
+        colspan-repeated section labels ("LƯU CHUYỂN TIỀN TỪ HOẠT ĐỘNG ĐẦU TƯ") never trigger it;
+        a block that repeats the leading block's period text (page-break repeat) does not either.
+        """
+        first_data = next((r for r in self.data_rows if any(clean_text(c) for c in self._rows[r])), None)
+        if first_data is None:
+            return False
+        leading = [i for i in headers if i < first_data]
+        blocks: list[list[int]] = []
+        for i in (i for i in headers if i > first_data):
+            if blocks and blocks[-1][-1] == i - 1:
+                blocks[-1].append(i)
+            else:
+                blocks.append([i])
+        for col in self.value_cols:
+            lead_text = self._period_text(leading, col)
+            if any((text := self._period_text(block, col)) and text != lead_text for block in blocks):
+                return True
+        return False
+
+    def _period_text(self, header_rows: Sequence[int], col: int) -> str:
+        parts = []
+        for i in header_rows:
+            folded = fold_text(self._cell(i, col))
+            info = period_info(folded, report_year=self.report_year)
+            if folded and (info.year is not None or info.role != PeriodRole.UNKNOWN):
+                parts.append(folded)
+        return " | ".join(parts)
 
     @staticmethod
     def _parses(raw: str) -> bool:
@@ -260,6 +299,8 @@ class TableView:
             roles = {PeriodRole.CURRENT} if period_kind == "flow" else {PeriodRole.CLOSING, PeriodRole.CURRENT}
         else:
             roles = {PeriodRole.PRIOR} if period_kind == "flow" else {PeriodRole.OPENING, PeriodRole.PRIOR}
+        if self._multi_block:  # one header per column cannot describe several blocks: fail safe
+            return ()
         matched = []
         for col in self.value_cols:
             info = period_info(self.column_header(col), report_year=self.report_year)
