@@ -7,15 +7,19 @@ lazily by the code that opens the real indexes, never at import time.
 
 from __future__ import annotations
 
-from config.settings import RRF_CONSTANT
+from pathlib import Path
+
+from config.settings import PROJECT_ROOT, RRF_CONSTANT
 from src.calculation.metric_tree import LeafDef
 from src.extraction.retrieval import RankedTable, TableRetrievalError
+from src.indexing.bm25_store import load_bm25, sqlite_source_identity
 from src.indexing.table_semantics import StatementKind
 from src.main.refine_questions import retrieve_refined
 from src.retrieval.filters import normalize_metadata_filters
 from src.retrieval.hybrid import rrf_fuse
 
 MODES = ("hybrid", "bm25")
+COLLECTION = "vifinqa_tables"
 
 STATEMENT_NAMES: dict[StatementKind, str] = {
     StatementKind.BALANCE_SHEET: "bảng cân đối kế toán",
@@ -59,13 +63,14 @@ class HybridTableRetriever:
                     self.bm25, query, k=self.depth, metadata_filters=filters)["documents"]
                 dense = self.dense_store.similarity_search(
                     query, k=self.depth, filter=_where(filters))
-                documents = rrf_fuse(lexical, dense, k=self.k, c=RRF_CONSTANT)
-            return tuple(
-                RankedTable(document.metadata["chunk_id"], index)
-                for index, document in enumerate(documents, 1)
-            )
         except Exception as exc:
             raise TableRetrievalError(f"{self.mode} retrieval failed: {type(exc).__name__}") from exc
+        if self.mode == "hybrid":
+            documents = rrf_fuse(lexical, dense, k=self.k, c=RRF_CONSTANT)
+        return tuple(
+            RankedTable(document.metadata["chunk_id"], index)
+            for index, document in enumerate(documents, 1)
+        )
 
 
 def _where(filters: dict) -> dict:
@@ -77,3 +82,65 @@ def _where(filters: dict) -> dict:
         {"report_year": {"$in": filters["years"]}},
         {"scope": {"$in": scopes}},
     ]}
+
+
+def _chroma_client(path):
+    import chromadb
+
+    return chromadb.PersistentClient(path=str(path))
+
+
+def _embeddings(device, fp16):
+    from src.indexing.embedding import get_embeddings
+
+    return get_embeddings(device=device, fp16=fp16)
+
+
+def _chroma_store(client, embeddings):
+    from langchain_chroma import Chroma
+
+    return Chroma(client=client, collection_name=COLLECTION, embedding_function=embeddings,
+                  create_collection_if_not_exists=False)
+
+
+def open_table_retriever(db_path, bm25_dir, *, bm25_name: str = "bm25-table", chroma_dir=None,
+                         mode: str = "hybrid", device: str = "cuda", fp16: bool = True,
+                         k: int = 10, depth: int = 20) -> HybridTableRetriever:
+    """Open the table indexes, failing fast on any mismatch (arguments, corpus identity, counts)."""
+    HybridTableRetriever(None, object(), mode=mode, k=k, depth=depth)  # validates mode / k / depth
+    if mode == "hybrid":
+        if chroma_dir is None:
+            raise ValueError("hybrid mode requires chroma_dir")
+        if fp16 is not True:
+            raise ValueError("the table Chroma index holds fp16 BGE-M3 vectors; fp16 must be True")
+        if not str(device).startswith("cuda"):
+            raise ValueError("fp16 table embeddings need a CUDA device")
+    bm25 = load_bm25(bm25_dir, bm25_name,
+                     expected_identity=sqlite_source_identity(db_path, chunk_types=("table",)))
+    dense_store = None
+    if mode == "hybrid":
+        if not (Path(chroma_dir) / "chroma.sqlite3").is_file():
+            raise FileNotFoundError(f"Chroma index not found: {Path(chroma_dir) / 'chroma.sqlite3'}")
+        client = _chroma_client(chroma_dir)
+        count = client.get_collection(COLLECTION).count()
+        if count != len(bm25.docs):
+            raise ValueError(
+                f"Chroma collection {COLLECTION!r} has {count} documents but the BM25 index has "
+                f"{len(bm25.docs)}; rebuild the stale index")
+        dense_store = _chroma_store(client, _embeddings(device, fp16))
+    return HybridTableRetriever(bm25, dense_store, mode=mode, k=k, depth=depth)
+
+
+def add_retriever_arguments(parser) -> None:
+    parser.add_argument("--retriever", choices=("none", "bm25", "hybrid"), default="none")
+    parser.add_argument("--bm25-dir", default=str(Path(PROJECT_ROOT) / "data" / "indexes" / "bm25"))
+    parser.add_argument("--bm25-name", default="bm25-table")
+    parser.add_argument("--chroma-dir", default=None)
+    parser.add_argument("--device", default="cuda")
+
+
+def retriever_from_args(args, db_path) -> HybridTableRetriever | None:
+    if args.retriever == "none":
+        return None
+    return open_table_retriever(db_path, args.bm25_dir, bm25_name=args.bm25_name,
+                                chroma_dir=args.chroma_dir, mode=args.retriever, device=args.device)
