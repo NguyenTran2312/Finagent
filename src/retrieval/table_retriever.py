@@ -2,7 +2,8 @@
 
 Implements the ``TableRetriever`` protocol of ``src.extraction.retrieval``. This
 module must stay import-light: torch, chromadb and embedding models are loaded
-lazily by the code that opens the real indexes, never at import time.
+lazily by the code that opens the real indexes, never at import time. The source Chroma
+index is never opened in place; a snapshot copy is opened instead (see ``open_table_retriever``).
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from config.settings import PROJECT_ROOT, RRF_CONSTANT
 from src.calculation.metric_tree import LeafDef
 from src.extraction.retrieval import RankedTable, TableRetrievalError
 from src.indexing.bm25_store import load_bm25, sqlite_source_identity
+from src.indexing.chroma import chroma_snapshot
 from src.indexing.table_semantics import StatementKind
 from src.main.refine_questions import retrieve_refined
 from src.retrieval.filters import normalize_metadata_filters
@@ -106,7 +108,12 @@ def _chroma_store(client, embeddings):
 def open_table_retriever(db_path, bm25_dir, *, bm25_name: str = "bm25-table", chroma_dir=None,
                          mode: str = "hybrid", device: str = "cuda", fp16: bool = True,
                          k: int = 10, depth: int = 20) -> HybridTableRetriever:
-    """Open the table indexes, failing fast on any mismatch (arguments, corpus identity, counts)."""
+    """Open the table indexes, failing fast on any mismatch (arguments, corpus identity, counts).
+
+    The source Chroma index is never opened directly (opening can migrate or rewrite it): hybrid
+    mode opens a snapshot copy at ``<chroma_dir parent>/loaded/<sha>``. The first hybrid start
+    copies the index once (~3 GB); later starts reuse the copy.
+    """
     HybridTableRetriever(None, object(), mode=mode, k=k, depth=depth)  # validates mode / k / depth
     if mode == "hybrid":
         if chroma_dir is None:
@@ -119,9 +126,8 @@ def open_table_retriever(db_path, bm25_dir, *, bm25_name: str = "bm25-table", ch
                      expected_identity=sqlite_source_identity(db_path, chunk_types=("table",)))
     dense_store = None
     if mode == "hybrid":
-        if not (Path(chroma_dir) / "chroma.sqlite3").is_file():
-            raise FileNotFoundError(f"Chroma index not found: {Path(chroma_dir) / 'chroma.sqlite3'}")
-        client = _chroma_client(chroma_dir)
+        snapshot = chroma_snapshot(chroma_dir, cache_root=Path(chroma_dir).resolve().parent)
+        client = _chroma_client(snapshot)
         count = client.get_collection(COLLECTION).count()
         if count != len(bm25.docs):
             raise ValueError(

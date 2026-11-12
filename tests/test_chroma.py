@@ -15,7 +15,7 @@ from unittest.mock import patch
 from langchain_core.documents import Document
 
 from src.indexing import chroma
-from src.indexing.chroma import _copy_cache, load_or_build_chroma
+from src.indexing.chroma import _copy_cache, chroma_snapshot, load_or_build_chroma
 
 
 class RecordingStore:
@@ -215,6 +215,29 @@ class ChromaDocumentIdentityTests(unittest.TestCase):
             with patch.dict(os.environ, {"VIFINQA_CHROMA_CACHE_DIR": ""}), patch.dict(sys.modules, modules):
                 store = load_or_build_chroma(documents, SimpleNamespace(), cache_root=Path(temporary_directory))
         self.assertEqual(list(store.records), ["legacy|table_1", "1", "2"])
+
+
+class ChromaSnapshotTests(unittest.TestCase):
+    def test_chroma_snapshot_copies_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "index"
+            source.mkdir()
+            (source / "chroma.sqlite3").write_bytes(b"sqlite")
+            (source / "extra.bin").write_bytes(b"extra")
+            cache_root = Path(tmp) / "cache"
+            first = chroma_snapshot(source, cache_root=cache_root)
+            self.assertEqual(first.parent, cache_root / "loaded")
+            self.assertEqual((first / "chroma.sqlite3").read_bytes(), b"sqlite")
+            self.assertEqual((first / "extra.bin").read_bytes(), b"extra")
+            self.assertEqual(sorted(p.name for p in source.iterdir()), ["chroma.sqlite3", "extra.bin"])
+            with patch.object(chroma.shutil, "copytree") as copytree:
+                second = chroma_snapshot(source, cache_root=cache_root)
+            copytree.assert_not_called()
+            self.assertEqual(second, first)
+
+    def test_chroma_snapshot_requires_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(FileNotFoundError):
+            chroma_snapshot(Path(tmp), cache_root=Path(tmp) / "cache")
 
 
 if __name__ == "__main__":

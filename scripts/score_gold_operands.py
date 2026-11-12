@@ -71,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.db.is_file():
         parser.error(f"database not found: {args.db} (pass --db explicitly when the corpus "
                      "is not under this checkout's data/databases/)")
+    if not args.gold.is_file():
+        parser.error(f"gold file not found: {args.gold}")
+    if not args.out.parent.is_dir():
+        parser.error(f"output directory does not exist: {args.out.parent}")
     gold_path, out_path, llm_module = args.gold, args.out, args.llm
     tree, templates = MetricTree.load(), load_ticker_templates()
     recs = [json.loads(line) for line in open(gold_path, encoding="utf-8") if line.strip()]

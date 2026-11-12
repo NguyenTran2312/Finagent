@@ -143,6 +143,9 @@ class FakeClient:
         return MagicMock(count=lambda: self.count)
 
 
+SNAP = Path("snapshot-sentinel")
+
+
 class OpenTableRetrieverTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -168,7 +171,7 @@ class OpenTableRetrieverTests(unittest.TestCase):
     def test_chroma_count_must_match_bm25(self):
         (self.chroma / "chroma.sqlite3").write_bytes(b"")
         client = FakeClient(count=len(bm25.docs) + 1)
-        with patch.object(table_retriever, "_chroma_client", return_value=client),              patch.object(table_retriever, "_embeddings") as emb:
+        with patch.object(table_retriever, "chroma_snapshot", return_value=SNAP),                 patch.object(table_retriever, "_chroma_client", return_value=client),                 patch.object(table_retriever, "_embeddings") as emb:
             with self.assertRaises(ValueError) as caught:
                 open_table_retriever(self.db, self.idx, chroma_dir=self.chroma)
         emb.assert_not_called()
@@ -186,8 +189,11 @@ class OpenTableRetrieverTests(unittest.TestCase):
         (self.chroma / "chroma.sqlite3").write_bytes(b"")
         client = FakeClient(count=len(bm25.docs))
         store = FakeDenseStore()
-        with patch.object(table_retriever, "_chroma_client", return_value=client),              patch.object(table_retriever, "_embeddings", return_value="emb") as emb,              patch.object(table_retriever, "_chroma_store", return_value=store) as make_store:
+        with patch.object(table_retriever, "chroma_snapshot", return_value=SNAP) as snap,                 patch.object(table_retriever, "_chroma_client", return_value=client) as make_client,                 patch.object(table_retriever, "_embeddings", return_value="emb") as emb,                 patch.object(table_retriever, "_chroma_store", return_value=store) as make_store:
             r = open_table_retriever(self.db, self.idx, chroma_dir=self.chroma)
+        snap.assert_called_once_with(self.chroma, cache_root=self.chroma.resolve().parent)
+        make_client.assert_called_once_with(SNAP)
+        self.assertNotIn(self.chroma, [c.args[0] for c in make_client.call_args_list])
         self.assertEqual(r.mode, "hybrid")
         self.assertIs(r.dense_store, store)
         emb.assert_called_once_with("cuda", True)

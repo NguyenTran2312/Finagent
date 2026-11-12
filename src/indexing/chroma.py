@@ -70,9 +70,8 @@ def _copy_cache(source: Path, destination: Path) -> None:
             shutil.rmtree(staging)
 
 
-def load_chroma_cache(embeddings, cache_dir, *, collection_name=None,
-                      cache_root: Path = CHROMA_CACHE_ROOT):
-    """Open an existing snapshot without creating collections or adding vectors."""
+def chroma_snapshot(cache_dir, *, cache_root) -> Path:
+    """Return a reusable snapshot copy of a Chroma index; the source is only read, never opened."""
     source = Path(cache_dir).resolve()
     database = source / "chroma.sqlite3"
     if not database.is_file():
@@ -81,6 +80,14 @@ def load_chroma_cache(embeddings, cache_dir, *, collection_name=None,
     snapshot = hashlib.sha256(f"{source}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()
     root = Path(cache_root) / "loaded" / snapshot
     _copy_cache(source, root)
+    return root
+
+
+def load_chroma_cache(embeddings, cache_dir, *, collection_name=None,
+                      cache_root: Path = CHROMA_CACHE_ROOT):
+    """Open an existing snapshot without creating collections or adding vectors."""
+    source = Path(cache_dir).resolve()
+    root = chroma_snapshot(source, cache_root=cache_root)
 
     import chromadb
     from langchain_chroma import Chroma
