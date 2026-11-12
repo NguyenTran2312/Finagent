@@ -520,6 +520,70 @@ Expected: both runs exit 0 with no `FAILED` line; the bm25 CSV has `retrieval_st
 
 ---
 
+### Task 9: Per-report candidate cache in the adapter (spec §5.5, added 2026-11-12)
+
+Run before Task 8 step 2. Gate step 1 measured hybrid at ~2.1 s per `rank` call (Chroma filtered search 1.7 s); see spec §5.5.
+
+**Files:**
+- Modify: `src/main/refine_questions.py` (extract `rank_indices`), `src/retrieval/table_retriever.py`
+- Test: `tests/test_table_retriever.py` (class `CandidateCacheTests`), plus one test for `rank_indices` beside the existing `retrieve_refined` tests (grep `tests/` for `retrieve_refined`)
+
+**Interfaces:**
+- `rank_indices(retriever, question: str, indices: list[int], k: int) -> tuple[list[Document], list[float]]` in `src/main/refine_questions.py`: the body of `retrieve_refined` from `get_batch_scores` to the top-k slice, moved verbatim (`np.argsort(scores)[::-1]`, zero scores dropped, first `k`); `retrieve_refined` calls it and returns the same dict as today.
+- `HybridTableRetriever` keeps its constructor and `rank` signature. Inside:
+  - `_candidates(filters) -> _Candidates(indices: list[int], chunk_ids: list[str])`, cached per `(ticker, year, tuple(scopes))` in an LRU of `CANDIDATE_CACHE_SIZE = 32` (`collections.OrderedDict`); computed with `filter_document_indices(self.bm25.docs, filters)`.
+  - BM25 list: `rank_indices(self.bm25, query, candidates.indices, k)` (`k = self.k` in bm25 mode, `self.depth` in hybrid).
+  - Dense (hybrid): per key, `self.dense_store.get(ids=candidates.chunk_ids, include=["embeddings", "metadatas"])` once (cached with the candidates); query vector `self.dense_store.embeddings.embed_query(query)` cached per query text (plain dict); scores = `matrix @ vector` (numpy, imported lazily); top `depth` by score descending, ties by fetch order; each becomes `Document(page_content="", metadata=<fetched metadata>)`. `similarity_search` is no longer called.
+  - `rrf_fuse(lexical, dense, k=self.k, c=RRF_CONSTANT)` and the `RankedTable` building unchanged; the `try → TableRetrievalError` covers `rank_indices`, `get`, `embed_query` and the dot product only.
+  - An empty candidate set → `()` without touching the dense store.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+def test_rank_indices_matches_retrieve_refined(self):        # beside the retrieve_refined tests
+    # same tiny BM25; indices = filter_document_indices(docs, filters)
+    docs, scores = rank_indices(bm25, "doanh thu", indices, 3)
+    self.assertEqual(docs, retrieve_refined(bm25, "doanh thu", k=3, metadata_filters=filters)["documents"])
+
+class CandidateCacheTests(unittest.TestCase):
+    def test_candidates_computed_once_per_report(self):
+        # patch filter_document_indices in table_retriever's namespace with wraps=...
+        r.rank("VJC", "consolidated", 2023, leaf_is); r.rank("VJC", "consolidated", 2023, leaf_bs)
+        self.assertEqual(spy.call_count, 1)
+        r.rank("VJC", "consolidated", 2022, leaf_is)
+        self.assertEqual(spy.call_count, 2)
+
+    def test_dense_vectors_fetched_once_and_query_embedded_once(self):
+        # FakeDenseStore with get(ids, include) -> {"ids", "embeddings", "metadatas"} and
+        # embeddings.embed_query(text) -> fixed unit vectors per text; both count calls
+        r.rank("VJC", "consolidated", 2023, leaf_is); r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertEqual(store.get_calls, 1); self.assertEqual(store.embed_calls, 1)
+        self.assertEqual(store.similarity_calls, 0)
+
+    def test_dense_order_is_exact_cosine(self):
+        # vectors chosen so cosine order is C, A, B; bm25 list empty for the query (no shared tokens)
+        self.assertEqual([t.chunk_id for t in out], ["VJC23C:3", "VJC23C:1", "VJC23C:2"][:r.k])
+
+    def test_hybrid_equals_rrf_of_cached_branches(self):
+        # expected = rrf_fuse(rank_indices(...)[0], <exact dense list>, k=r.k, c=60) chunk ids
+
+    def test_dense_get_error_is_wrapped(self):
+        # get raises RuntimeError -> TableRetrievalError with __cause__
+
+    def test_no_candidates_returns_empty_without_dense_call(self):
+        self.assertEqual(r.rank("ZZZ", "consolidated", 2023, leaf_is), ())
+        self.assertEqual(store.get_calls, 0)
+```
+
+Existing `HybridTableRetrieverTests` keep their assertions; adapt `FakeDenseStore` (add `get` / `embeddings`) so the where-clause test checks the ids passed to `get` instead of the Chroma filter.
+- [ ] **Step 2: Run** → new tests FAIL.
+- [ ] **Step 3: Implement** as in Interfaces. Update the module docstring (cache, exact dense search).
+- [ ] **Step 4: Run** `tests.test_table_retriever`, the `retrieve_refined` test module, the full suite, compileall, the import-isolation check (Task 5 Step 4) → PASS.
+- [ ] **Step 5: Commit** `perf(retrieval): cache per-report candidates and score dense vectors exactly`.
+- [ ] **Step 6 (controller, real indexes):** equivalence script in the scratchpad — for every gold request (ticker, scope, year, leaf) compare the new `rank` with the old path (`retrieve_refined` + `similarity_search` + `rrf_fuse`, top 10): identical-list share, mean overlap; then re-score gold with `--retriever hybrid` (expect 641 correct / 2 WRONG or better) and time it.
+
+---
+
 ### Task 8: Evaluation gate (§7.2) and record
 
 **Files:**

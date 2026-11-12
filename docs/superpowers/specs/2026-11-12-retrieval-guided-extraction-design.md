@@ -97,6 +97,8 @@ import. It only defines the protocol; the adapter lives under `src/retrieval`.
 
 Unchanged: `find_rows`, `TableView`, row matchers, unit and period rules, `ReportStore`,
 `retrieve_refined`, `rrf_fuse`, `hybrid.py`, the index builder and both index formats.
+(*Amended 2026-11-12:* `retrieve_refined`'s scoring loop moves into `rank_indices` in the same
+module, behaviour unchanged, so the adapter can score cached candidates, §5.5.)
 
 ### 3.2 Types
 
@@ -198,6 +200,8 @@ measured no better than V1). The query is built from config only; no LLM, no use
 - `hybrid`: BM25 through `retrieve_refined(bm25, query, k=depth, metadata_filters=...)` and dense
   through `store.similarity_search(query, k=depth, filter=<Chroma where>)`, `depth = 20` each,
   fused by `rrf_fuse(..., k=k, c=RRF_CONSTANT)`; the first `k = 10` are returned.
+  *Amended 2026-11-12:* both branches now search a cached per-report candidate set (§5.5);
+  scoring and fusion are unchanged.
 - `bm25`: the first `k` of the BM25 list.
 - Ranks are positions in the returned list. `chunk_id` comes from document metadata.
 - Backend exceptions (Chroma, torch, BM25 scoring) are re-raised as `TableRetrievalError` with
@@ -234,6 +238,39 @@ tests; `open_table_retriever` loads the real indexes.
 Any failed check raises before the extractor is built; there is no silent fallback to
 another mode or to no retriever.
 
+*Amended 2026-11-12 (final review):* step 2 opens a snapshot copy of the Chroma directory
+(`chroma_snapshot`, at `<chroma_dir parent>/loaded/<sha>`, copied once), never the source
+directory: chromadb applies migrations and replays its log on open, which could rewrite the
+index.
+
+### 5.5 Per-report candidate cache (amended 2026-11-12, after gate measurements)
+
+Measured on the real indexes (25 `rank` calls): Chroma `similarity_search` with the where-filter
+1.73 s median (21 s max) against 0.02 s unfiltered; BM25 `retrieve_refined` 0.28 s (Python scan of
+146k metadata); query embedding 0.13 s; Chroma `get(ids=...)` of one report's ~74 vectors 0.04 s.
+A full-corpus hybrid run would take over 30 h. Chroma ids equal `chunk_id`.
+
+- **Candidates** per key `(ticker, report_year, scope)`: `filter_document_indices(bm25.docs, filters)`
+  once; the key's chunk_ids are those documents' `chunk_id`. Kept in an LRU of 32 keys (the
+  extractor reads one report and its next-year report at a time).
+- **BM25 branch:** scoring of the cached indices by `rank_indices(retriever, question, indices, k)`,
+  extracted unchanged from `retrieve_refined` (same scores, ordering and zero-score drop);
+  `retrieve_refined` calls it, so its behaviour is identical.
+- **Dense branch:** the key's vectors and metadata are fetched once with
+  `store.get(ids=chunk_ids, include=["embeddings", "metadatas"])`; the query vector comes from
+  `store.embeddings.embed_query(query)`, cached per query text (queries repeat across reports).
+  Scores are dot products of the normalised vectors (cosine, the index's space); the top `depth`
+  by score form the dense list. This is an exact search over the filtered set where Chroma ran a
+  filtered HNSW search; lists can differ only at near-ties.
+- Fusion, `k`, `depth`, ranks and error wrapping (`get`, `embed_query`, BM25 scoring →
+  `TableRetrievalError`) are as in §5.2.
+- **Equivalence check before the gate:** for the gold requests, the new lists are compared with
+  the old path (`retrieve_refined` + `similarity_search` + `rrf_fuse`); the share of identical
+  top-k lists is reported and gold is re-scored with `hybrid`.
+
+Decision 4 still holds for scoring: no new model, weights or fusion; only the search over the
+filtered set is exact and cached.
+
 ## 6. Risks of filtering
 
 | Risk | Mechanism | How it shows | Measured by |
@@ -241,7 +278,7 @@ another mode or to no retriever.
 | R1 hidden conflict | Two rows match with different values; the table holding the second is outside the top k. Today: `Ambiguous(multiple_rows)`. With R: a confident `Found`. Real case: DCM total assets, balance sheet 8,717 bn vs a subsidiary note's "Tổng tài sản" 50.7 bn. | `Ambiguous` → `Found`, or a changed value | §7 step 2 |
 | R2 tier substitution | §6.2 of the leaf design reads tables tagged with the leaf's statement kind first and anchored `note`/`unknown` tables only when those give no row. If the top k holds no tagged table but an anchored one, step R reads the anchored table where today's scan would read the tagged one. | changed value or changed source table | §7 step 2 (source `chunk_id` compared too) |
 | R3 stale index | The corpus changed after indexing. | start-up failure (§5.4) or `retrieval_unknown_chunks` | start-up check |
-| R4 latency | BM25 filtering scans document metadata in Python (~0.1 s per query measured); dense adds a GPU query. | per-request time | §7 step 2 (p50 / p95 reported) |
+| R4 latency | BM25 filtering scans document metadata in Python (0.28 s per query measured on the gate); Chroma's filtered search 1.7 s median. Addressed by §5.5. | per-request time | §7 step 2 (p50 / p95 reported) |
 
 Candidate mitigation if the gate finds R1 / R2 cases: always add the document's tables tagged
 with the leaf's statement kind to `views_R`. Not part of this design; decided after the gate.
