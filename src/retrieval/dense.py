@@ -28,7 +28,11 @@ CACHE_ROOT = CHROMA_CACHE_ROOT
 
 def load_dense_documents(connection_params: dict[str, Any] | None = None):
     """Keep chunk/source identity while adapting list metadata to Chroma scalars."""
-    documents = load_corpus_documents(connection_params)
+    return prepare_dense_documents(load_corpus_documents(connection_params))
+
+
+def prepare_dense_documents(documents):
+    """Adapt corpus Documents (PostgreSQL or SQLite loader) to Chroma scalar metadata, in place."""
     for index, document in enumerate(documents):
         document.metadata["page_ids_json"] = json.dumps(document.metadata.pop("page_ids"), ensure_ascii=False)
         document.metadata["table_index"] = index
@@ -45,5 +49,25 @@ def load_or_build_dense(connection_params: dict[str, Any] | None = None, *, cach
     documents = load_dense_documents(connection_params)
     print(f"Loaded {len(documents):,} chunks; embedding model: {DENSE_MODEL_NAME}", flush=True)
     embeddings = get_embeddings(device=device, batch_size=batch_size, max_seq_length=max_seq_length)
+    return load_or_build_chroma(documents, embeddings, cache_root=Path(cache_root), load_only=load_only)
+
+
+def load_or_build_dense_sqlite(db_path: str | Path, *, chunk_types=None, limit: int | None = None,
+                               cache_root: str | Path = CACHE_ROOT, device: str = "auto",
+                               batch_size: int = DENSE_BATCH_SIZE,
+                               max_seq_length: int = DENSE_MAX_SEQ_LENGTH, load_only: bool = False,
+                               fp16: bool = False):
+    """SQLite counterpart of load_or_build_dense; resumable like it (missing IDs only).
+
+    fp16 builds a separate cache (its fingerprint records the dtype); query with the same setting.
+    """
+    from retrieval.sqlite_corpus import load_sqlite_corpus_documents
+
+    documents = prepare_dense_documents(
+        load_sqlite_corpus_documents(db_path, chunk_types=chunk_types, limit=limit)
+    )
+    print(f"Loaded {len(documents):,} chunks; embedding model: {DENSE_MODEL_NAME}", flush=True)
+    embeddings = get_embeddings(device=device, batch_size=batch_size, max_seq_length=max_seq_length,
+                                fp16=fp16)
     return load_or_build_chroma(documents, embeddings, cache_root=Path(cache_root), load_only=load_only)
 

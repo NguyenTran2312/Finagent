@@ -21,3 +21,5 @@ data/caches/
 data/databases/
 data/financial_statements/
 outputs/
+data/chroma/
+data/indexes/
