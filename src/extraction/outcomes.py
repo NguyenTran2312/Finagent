@@ -8,6 +8,7 @@ from typing import Literal, Union
 
 from src.calculation.facts import Fact, Scope
 from src.calculation.metric_tree import LeafRequest
+from src.extraction.retrieval import RetrievalTrace
 
 Method = Literal["code", "label", "section_position", "llm_located"]
 
@@ -33,6 +34,7 @@ class ExtractedFact:
     fact: Fact
     method: Method
     warnings: tuple[str, ...]
+    retrieval: RetrievalTrace | None = None
 
 
 @dataclass(frozen=True)
