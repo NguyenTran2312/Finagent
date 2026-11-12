@@ -364,7 +364,34 @@ scoring or index formats; re-indexing.
 
 ## 10. Open items
 
-- Gate results (§7) are pending; this section records them when available.
+- **Gate results (§7), 2026-11-13, at 60d4239. Verdict: do not enable by default.** Both
+  `bm25` and `hybrid` add new wrong values (step 4). The user chose to record the results only.
+  The §6 mitigation and cross-check stay open.
+  - **Gold** (663 requests):
+    - `none`: 642 correct / 2 wrong.
+    - `bm25`: 642 / 2, no outcome change.
+    - `hybrid`: 641 / 2. QNS admin_expenses 2023 went Found → `Ambiguous(multiple_period_columns)`.
+  - **Speed** (§5.5): gold hybrid time fell from 1,662 s to 271 s. 90 % of top-10 lists are identical to Chroma's filtered HNSW and the mean overlap is 99.1 %. Outcomes are unchanged.
+  - **Full corpus** (53,480 requests), compared with `none` (2,558 s):
+
+    | | `bm25` | `hybrid` |
+    |---|---|---|
+    | Run time | 2,231 s | 2,318 s |
+    | Retrieved / full scan | 43,121 / 1,547 | 42,848 / 1,828 |
+    | Requests changed | 51 | 82 |
+    | `ambiguous_to_found` | 31: all checked, 28 correct, **3 wrong** | 45: sample of 30, 27 correct, **3 wrong** |
+    | `value_changed` | 0 | 1, **wrong** (base correct) |
+    | `source_changed`, all same value | 6 | 11 |
+    | `found_to_other` (no wrong value) | 7 | 15 |
+    | `other_to_found` | 0 | 2, correct |
+
+    `retrieval_error` and `retrieval_unknown_chunks` were 0 in both runs.
+  - **Wrong values:**
+    - `bm25`: HHV 2024 consolidated `construction_in_progress` took the note sub-line 9.34 bn instead of the total 11.08 bn (BS 242). DPM 2015 consolidated `cost_of_goods_sold` and `financial_expenses` were read from the separate income statement inside the consolidated document (t6 instead of t65).
+    - `hybrid`: the same HHV case; DPM 2015 `profit_before_tax` (same separate-statement cause); GAS 2021 separate `other_expenses` from a BCC note; GVR 2023 `retained_earnings`, where a note table's 01/01/2023 figure replaced the balance sheet's 31/12/2023 figure.
+    - Every case is R1/R2: the top k held a non-statement table, or a statement of the wrong scope, while the right statement fell outside the top k.
+  - **Lost `Found`:** the step R ambiguity is final, so a note table with several period columns (QNS, EIB), or a bank table with no unit (BID), stops the read before the full scan. These cases produce no wrong value, only lost coverage.
+  - **Next step if this is resumed:** the §6 mitigation. Always add the tables tagged with the leaf's statement kind. Reading every case, it would turn all 7 wrong values into the statement value or, for DPM (both statements tagged), back to `Ambiguous`. That is not measured. Rerun §7 for both modes. Bank statements sometimes tagged `note` limit this.
 - If indexes are rebuilt under `data/`, note that `data/chroma/` and `data/indexes/` are
   ignored only on branches containing 6cd4e61; tools that snapshot untracked files of the main
   checkout (the Codex desktop app hashed them during the first build) can slow indexing badly.
