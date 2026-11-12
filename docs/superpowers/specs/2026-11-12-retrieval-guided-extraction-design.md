@@ -141,10 +141,13 @@ for the next-year source):
 
 1. **Retrieve once per source.** `ranked = retriever.rank(ticker, scope, Y, L)`, cached in the
    call object per `(Y, L.id)`; the result covers every scope-variant document of the source.
-2. **Step R.** For each document D of the source: `views_R` = D's views whose
-   `record.chunk_id` is in `ranked`. If `views_R` is non-empty, run today's `_in_document` with
-   `views_R` instead of all views. A `Found`, `Ambiguous`, `BlankValue` or `UnitUnknown` is D's
-   outcome; a `Found` gets `RetrievalTrace(mode, "retrieved", rank of the source table)`.
+2. **Step R.** For each document D of the source: when `ranked` is non-empty, `views_R` = D's
+   views whose `record.chunk_id` is in `ranked`, **plus** (§6.1, a statement leaf only) every view
+   of D whose `record.statement_kind` equals `L.statement_kind`. The views keep D's order. When
+   `ranked` is empty, `views_R` is empty. If `views_R` is non-empty, run today's `_in_document`
+   with `views_R` instead of all views. A `Found`, `Ambiguous`, `BlankValue` or `UnitUnknown` is
+   D's outcome. A `Found` gets `RetrievalTrace(mode, "retrieved", rank)`, where `rank` is the
+   source table's rank, or `None` when only the §6.1 rule added that table.
 3. **Step F.** If `views_R` is empty or step R gave `NotFound`, run today's `_in_document` with
    all of D's views. A `Found` gets `RetrievalTrace(mode, "full_scan", None)`.
 4. Per-document outcomes are combined across variants and sources exactly as today.
@@ -160,8 +163,8 @@ Runs under the same condition as today (final outcome `NotFound`, a document exi
 `CellLocator` injected). For each document it receives that document's `views_R` when
 non-empty, otherwise all of the document's views (today's behaviour). The locator's own shortlist (§8.2 of
 the leaf design) then ranks within that set. A verified pointer gives `Found(method=
-"llm_located")` with trace `retrieved` and the pointed table's rank when the table is in
-`ranked`, otherwise `full_scan`.
+"llm_located")`. Its trace is `retrieved` when the pointed table is in that document's `views_R`,
+with the table's rank (`None` when §6.1 added it), and `full_scan` otherwise.
 
 ### 4.4 Retriever answers and failures
 
@@ -280,8 +283,13 @@ filtered set is exact and cached.
 | R3 stale index | The corpus changed after indexing. | start-up failure (§5.4) or `retrieval_unknown_chunks` | start-up check |
 | R4 latency | BM25 filtering scans document metadata in Python (0.28 s per query measured on the gate); Chroma's filtered search 1.7 s median. Addressed by §5.5. | per-request time | §7 step 2 (p50 / p95 reported) |
 
-Candidate mitigation if the gate finds R1 / R2 cases: always add the document's tables tagged
-with the leaf's statement kind to `views_R`. Not part of this design; decided after the gate.
+### 6.1 Statement-table rule (adopted 2026-11-13 after the first gate)
+
+The first gate (§10) found R1/R2 wrong values in both modes. Statement leaves therefore always add the document's views tagged with the leaf's statement kind to `views_R` (§4.2 step 2).
+
+Step R's tier 1 (`find_rows`: tagged tables first) then sees the same tagged tables as a full scan. The retriever narrows only the anchored `note`/`unknown` tier and the tables of note leaves (`source == "notes"`), which the rule leaves unchanged.
+
+The cost is that fewer `Ambiguous → Found` gains survive when the conflict lies between tagged tables. The rule does not help when a bank statement is tagged `note`. Rank histograms count rows with step `retrieved` and no rank as `unranked`.
 
 ## 7. Evaluation gate (before enabling by default)
 
@@ -391,7 +399,7 @@ scoring or index formats; re-indexing.
     - `hybrid`: the same HHV case; DPM 2015 `profit_before_tax` (same separate-statement cause); GAS 2021 separate `other_expenses` from a BCC note; GVR 2023 `retained_earnings`, where a note table's 01/01/2023 figure replaced the balance sheet's 31/12/2023 figure.
     - Every case is R1/R2: the top k held a non-statement table, or a statement of the wrong scope, while the right statement fell outside the top k.
   - **Lost `Found`:** the step R ambiguity is final, so a note table with several period columns (QNS, EIB), or a bank table with no unit (BID), stops the read before the full scan. These cases produce no wrong value, only lost coverage.
-  - **Next step if this is resumed:** the §6 mitigation. Always add the tables tagged with the leaf's statement kind. Reading every case, it would turn all 7 wrong values into the statement value or, for DPM (both statements tagged), back to `Ambiguous`. That is not measured. Rerun §7 for both modes. Bank statements sometimes tagged `note` limit this.
+  - **Next step (adopted 2026-11-13 as §6.1; second gate below):** the §6 mitigation. Always add the tables tagged with the leaf's statement kind. Reading every case, it would turn all 7 wrong values into the statement value or, for DPM (both statements tagged), back to `Ambiguous`. That is not measured. Rerun §7 for both modes. Bank statements sometimes tagged `note` limit this.
 - If indexes are rebuilt under `data/`, note that `data/chroma/` and `data/indexes/` are
   ignored only on branches containing 6cd4e61; tools that snapshot untracked files of the main
   checkout (the Codex desktop app hashed them during the first build) can slow indexing badly.

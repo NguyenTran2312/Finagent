@@ -584,6 +584,49 @@ Existing `HybridTableRetrieverTests` keep their assertions; adapt `FakeDenseStor
 
 ---
 
+### Task 10: Statement-table rule in step R (spec §6.1, added 2026-11-13)
+
+The first gate found new wrong values in both modes, all of them R1/R2 (spec §10). The user chose to adopt the §6 mitigation and rerun the gate.
+
+**Files:**
+- Modify: `src/extraction/extractor.py`
+- Modify: `scripts/diff_extraction_runs.py` and `scripts/score_gold_operands.py` (rank histograms)
+- Test: `tests/test_extraction_retrieval.py`, `tests/test_diff_extraction_runs.py`
+
+**Interfaces:**
+- `_ranked_views(d: _Doc, ranking: _Ranking | None, leaf: LeafDef) -> list[TableView]`:
+  - Returns `[]` when `ranking is None` or `ranking.ranks` is empty.
+  - Otherwise returns the views of `d.views`, in their original order, that pass either test: `v.record.chunk_id in ranking.ranks`, or `leaf.source == "statement" and v.record.statement_kind == leaf.statement_kind`.
+  - Both `_read_document` and `_locate` call it with `job.leaf`.
+- `_read_document`: a step R `Found` gets `RetrievalTrace(mode, "retrieved", ranking.ranks.get(chunk_id))`. The rank is `None` for a table that only the rule added. Step F is unchanged.
+- `_locate`: the locator receives `_ranked_views(d, ranking, job.leaf) or d.views`. Trace:
+  - `retrieved` with `ranks.get(chunk_id)` when the pointed chunk is among that document's `views_R` chunk ids.
+  - `full_scan` with `None` otherwise.
+- Rank histograms (`rank_bin` in both scripts): a row whose step is `retrieved` and whose rank is empty counts in a new bucket `unranked`. It is printed after `>10`.
+
+- [ ] **Step 1: Write the failing tests** in `RetrievalStepTests` / `RetrievalLocatorTests`:
+  - `test_statement_table_is_always_read_in_step_r`: only the note table `VJC23C:table:2` is ranked → `Found` −1,950,254,195,864 with `RetrievalTrace("fake", "retrieved", None)`.
+  - `test_r1_conflict_between_statement_tables_stays_ambiguous`: the old R1 fixture, where only table 3 is ranked → `Ambiguous(multiple_rows)`, the same as with no retriever. This replaces `test_r1_hidden_conflict_is_accepted_risk`.
+  - `test_ranked_note_does_not_beat_unranked_statement`:
+    - Fixture: an IS table holds the leaf, and a ranked `note` table anchored for the income statement holds a different value.
+    - Expected: the IS value. Both tiers are present, and tier 1 wins.
+  - `test_note_leaf_reads_only_ranked_tables`: a `source == "notes"` leaf whose row sits in an unranked note table → `full_scan`, so the rule does not apply to note leaves.
+  - `test_locator_receives_statement_tables_too`: `ViewsLocator` sees the ranked views plus the tagged ones.
+  - **Keep the old mechanisms covered.** These existing tests relied on the IS table being outside the ranking:
+    - `test_row_outside_ranked_tables_falls_back_to_full_scan`
+    - `test_locator_receives_only_ranked_views`
+    - `test_locator_found_outside_ranked_tables_is_full_scan`
+    - `test_variant_without_ranked_table_is_read_in_full`
+    - unknown-chunk tests
+
+    Re-point each one at a case the rule does not touch: a note leaf, or a leaf row in an untagged table. Keep its assertion. Do not just flip the expected values.
+  - `test_diff_extraction_runs`: a `retrieved` row with an empty rank counts as `unranked`.
+- [ ] **Step 2: Run** `tests.test_extraction_retrieval` → the new tests FAIL.
+- [ ] **Step 3: Implement** as in Interfaces. Update the `_ranked_views` and `_locate` docstrings to cite §6.1.
+- [ ] **Step 4: Run** the full suite, compileall and the import-isolation check → PASS.
+- [ ] **Step 5: Commit** `feat(extraction): always read statement tables of the leaf's kind in step R`.
+- [ ] **Step 6 (controller):** rerun §7.2 for `bm25` and `hybrid`: gold, full corpus, diff against `full_none.csv`, and a manual review. Then update spec §10 and the shared note.
+
 ### Task 8: Evaluation gate (§7.2) and record
 
 **Files:**
