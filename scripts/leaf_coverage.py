@@ -3,6 +3,8 @@
 Not imported by tests. Run from the repository root:
 
     python -I -X utf8 scripts/leaf_coverage.py [--db PATH] [--leaf ID ...] [--years 2015-2025] [--out CSV]
+                                     [--retriever {none,bm25,hybrid}] [--bm25-dir DIR]
+                                     [--bm25-name NAME] [--chroma-dir DIR] [--device DEVICE]
 
 For every ticker whose template is corporate or bank, every report year in --years and every
 scope that has a document for that year, each requested leaf (all leaves of the template by
@@ -16,8 +18,16 @@ rule. The anchor count is computed here, not by the extractor: a Found of a stat
 whose source table is tagged with a statement kind other than the leaf's own (an untagged,
 ``note`` or ``unknown`` table, or another statement) was read through the anchor rule.
 
+--retriever (default none) lets the extractor rank the tables of each source with the real
+BM25 / hybrid index before reading them; the report header prints it, and "Retrieval steps"
+counts the Found facts read from the retrieved shortlist versus a full scan, followed by the
+retrieval_error / retrieval_unknown_chunks warning totals.
+
 --out writes one CSV row per request (template, ticker, year, scope, leaf, outcome, reason,
-method, warnings, doc_id, anchor). Nothing else is written anywhere.
+method, warnings, doc_id, anchor, value, chunk_id, retrieval_step, retrieval_rank, seconds).
+value, chunk_id and the retrieval columns are empty unless the outcome is Found (and, for
+the retrieval columns, carries a trace). seconds is the wall time of the extract call that
+produced the row divided by its number of requests, 4 decimals. Nothing else is written.
 
 The database is opened read-only (mode=ro) and is never written.
 """
@@ -32,21 +42,24 @@ from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+for _path in (REPO_ROOT / "src", REPO_ROOT):  # the pickled BM25 imports preprocess.cleaner
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from src.calculation.metric_tree import LeafRequest, MetricTree  # noqa: E402
 from src.extraction.extractor import LeafExtractor  # noqa: E402
 from src.extraction.outcomes import Found  # noqa: E402
 from src.extraction.report_store import SqliteReportStore  # noqa: E402
 from src.extraction.templates import load_ticker_templates  # noqa: E402
+from src.retrieval.table_retriever import add_retriever_arguments, retriever_from_args  # noqa: E402
 
 DEFAULT_DB = REPO_ROOT / "data" / "databases" / "corpus.sqlite3"
 TEMPLATES = ("corporate", "bank")
 SCOPES = ("consolidated", "separate")  # the extractor accepts only these; other scopes are skipped
 TOP_REASONS = 15
 CSV_FIELDS = ("template", "ticker", "year", "scope", "leaf", "outcome", "reason", "method",
-              "warnings", "doc_id", "anchor")
+              "warnings", "doc_id", "anchor", "value", "chunk_id", "retrieval_step",
+              "retrieval_rank", "seconds")
 
 
 def parse_years(text: str) -> range:
@@ -108,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="leaf id to extract (repeatable; default: every leaf)")
     parser.add_argument("--years", type=parse_years, default=range(2015, 2026), metavar="A-B")
     parser.add_argument("--out", type=Path, default=None, help="CSV of per-request outcomes")
+    add_retriever_arguments(parser)
     args = parser.parse_args(argv)
     if not args.db.is_file():
         parser.error(f"database not found: {args.db} (pass --db explicitly when the corpus "
@@ -123,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown leaf id(s): {', '.join(unknown)}")
     store = SqliteReportStore(args.db)
-    extractor = LeafExtractor(store, tree, templates, fallback=None)
+    extractor = LeafExtractor(store, tree, templates, fallback=None,
+                              retriever=retriever_from_args(args, args.db))
     kinds = KindLookup(store)
 
     keys, skipped = [], Counter()
@@ -147,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     warnings: dict[str, Counter] = {t: Counter() for t in TEMPLATES}
     methods: dict[str, Counter] = {t: Counter() for t in TEMPLATES}
     anchor: dict[str, Counter] = {t: Counter() for t in TEMPLATES}  # "hits" / "statement_hits" / "anchor"
+    steps: Counter = Counter()
     failures: Counter = Counter()
     out_fh = args.out.open("w", encoding="utf-8", newline="") if args.out else None
     writer = csv.writer(out_fh) if out_fh else None
@@ -160,12 +176,14 @@ def main(argv: list[str] | None = None) -> int:
             requests = [LeafRequest(leaf.id, year, leaf.period_kind) for leaf in leaves[template]]
             if not requests:
                 continue
+            call_started = time.monotonic()
             try:
                 result = extractor.extract(ticker, scope, requests)
             except Exception as exc:  # keep the run going; each failure is reported at the end
                 failures[f"{type(exc).__name__}: {exc}"] += 1
                 print(f"FAILED {ticker} {year} {scope}: {type(exc).__name__}: {exc}", file=sys.stderr)
                 continue
+            seconds = f"{(time.monotonic() - call_started) / len(requests):.4f}"
             for outcome in result.outcomes:
                 leaf = by_id[outcome.request.metric_id]
                 name, reason, method, warns = describe(outcome)
@@ -175,8 +193,15 @@ def main(argv: list[str] | None = None) -> int:
                 for w in warns:
                     warnings[template][w.split(":", 1)[0]] += 1
                 doc_id, via_anchor = "", ""
+                value = chunk_id = step = rank = ""
                 if isinstance(outcome, Found):
                     source = outcome.extracted.fact.source
+                    value = str(outcome.extracted.fact.value.value)
+                    chunk_id = source.chunk_id or ""
+                    trace = outcome.extracted.retrieval
+                    if trace is not None:
+                        step, rank = trace.step, "" if trace.rank is None else str(trace.rank)
+                        steps[step] += 1
                     doc_id = source.doc_id
                     methods[template][method] += 1
                     anchor[template]["hits"] += 1
@@ -187,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
                         anchor[template]["anchor"] += table_kind != leaf.statement_kind
                 if writer:
                     writer.writerow((template, ticker, year, scope, leaf.id, name, reason, method,
-                                     ";".join(warns), doc_id, via_anchor))
+                                     ";".join(warns), doc_id, via_anchor, value, chunk_id, step, rank,
+                                     seconds))
             if out_fh:
                 out_fh.flush()
             if n % 25 == 0 or n == len(keys):
@@ -199,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
 
     names = sorted({n for c in outcomes.values() for n in c})
     print(f"# Leaf coverage ({args.db.name}, years {args.years.start}-{args.years.stop - 1}, "
-          f"fallback=None)\n")
+          f"fallback=None, retriever={args.retriever})\n")
     print(f"Reports processed: {len(keys)}; run time {time.monotonic() - started:.0f}s")
     print("Reports skipped: " + ", ".join(
         f"{r}={skipped[r]}" for r in ("unknown_scope", "other_scope", "template_other", "no_template"))
@@ -229,6 +255,10 @@ def main(argv: list[str] | None = None) -> int:
               + (", ".join(f"{k} {v}" for k, v in methods[template].most_common()) or "none"))
         print(f"Hits whose source table kind differs from the leaf's, approximating anchor-rule use "
               f"({template}): {anchor[template]['anchor']} of {statement_hits} statement-leaf hits\n")
+    print(f"Retrieval steps: retrieved {steps['retrieved']}, full_scan {steps['full_scan']}")
+    for code in ("retrieval_error", "retrieval_unknown_chunks"):
+        print(f"- {code}: {sum(w[code] for w in warnings.values())}")
+    print()
     if failures:
         print("## Failures\n")
         for message, count in failures.most_common():
