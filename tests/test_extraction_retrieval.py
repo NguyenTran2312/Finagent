@@ -7,18 +7,20 @@ import unittest
 from decimal import Decimal as D
 
 from src.calculation.metric_tree import LeafRequest
-from src.extraction.extractor import LeafExtractor
-from src.extraction.outcomes import Ambiguous, BlankValue, ExtractedFact, Found, ReportMissing
-from src.extraction.retrieval import RankedTable, RetrievalTrace, ranking_of
+from src.extraction.extractor import LeafExtractor, LocatorResult
+from src.extraction.outcomes import Ambiguous, BlankValue, ExtractedFact, Found, NotFound, ReportMissing
+from src.extraction.retrieval import RankedTable, RetrievalTrace, TableRetrievalError, ranking_of
 from tests.extraction_fixtures import record
 from tests.test_extraction_extractor import (
     INTEREST_2023,
     NET_REVENUE_2023,
+    StubLocator,
     default_store,
     doc,
     is_rows,
     is_table,
     one,
+    read_label,
     store_of,
     templates,
     tree,
@@ -189,6 +191,136 @@ class RetrievalStepTests(unittest.TestCase):
                             b, extracted=dataclasses.replace(b.extracted, retrieval=None)))
                     else:
                         self.assertEqual(a, b)
+
+
+def _no_interest_store():
+    """Table 1 has no interest row; table 2 is the note table: the deterministic search gives NotFound."""
+    return store_of((doc("VJC23C", 2023), [is_table("VJC23C", is_rows(2023, interest=False)),
+                                           record("VJC23C", 2, 30, _NOTE_ROWS, kind="note")]))
+
+
+class ViewsLocator(StubLocator):
+    """``StubLocator`` that also records the chunk ids of the views it received."""
+
+    def __init__(self, respond):
+        super().__init__(respond)
+        self.views = []
+
+    def locate(self, leaf, request, role, views):
+        self.views.append([v.record.chunk_id for v in views])
+        return super().locate(leaf, request, role, views)
+
+
+def _not_present(views):
+    return LocatorResult(None, None, ())
+
+
+class RetrievalFailureTests(unittest.TestCase):
+    def test_retrieval_error_degrades_to_full_scan(self):
+        for error, code in ((TableRetrievalError("x"), "TableRetrievalError"),
+                            (FileNotFoundError("x"), "FileNotFoundError")):
+            with self.subTest(code):
+                out = one_with(FakeRetriever(error=error))
+                self.assertEqual(out.extracted.fact.value.value, D("-1950254195864"))
+                self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
+                self.assertIn(f"retrieval_error:{code}", out.extracted.warnings)
+
+    def test_programming_error_from_retriever_propagates(self):
+        with self.assertRaises(KeyError):
+            one_with(FakeRetriever(error=KeyError("x")))
+
+    def test_invalid_answer_raises(self):
+        with self.assertRaises(ValueError):
+            one_with(FakeRetriever({(2023, "interest_expense"): (RankedTable("VJC23C:table:1", 2),)}))
+
+    def test_unknown_chunk_is_ignored_with_warning(self):
+        out = one_with(_interest("XYZ:table:9", "VJC23C:table:1"))
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 2))
+        self.assertIn("retrieval_unknown_chunks:1", out.extracted.warnings)
+
+    def test_only_unknown_chunks_reads_full_report(self):
+        out = one_with(_interest("XYZ:table:9", "XYZ:table:8"))
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
+        self.assertIn("retrieval_unknown_chunks:2", out.extracted.warnings)
+
+    def test_ranked_malformed_table_is_not_unknown(self):
+        bad_json = dataclasses.replace(is_table("VJC23C", is_rows(2023), table_id=2), rows_json="{not json")
+        store = store_of((doc("VJC23C", 2023), [is_table("VJC23C", is_rows(2023)), bad_json]))
+        out = one_with(_interest("VJC23C:table:2", "VJC23C:table:1"), store)
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 2))
+        self.assertIn("skipped_table:VJC23C:2", out.extracted.warnings)
+        self.assertFalse(any(w.startswith("retrieval_unknown_chunks") for w in out.extracted.warnings))
+
+    def test_not_found_carries_retrieval_warnings(self):
+        out = one_with(FakeRetriever(error=TableRetrievalError("x")), _no_interest_store())
+        self.assertIsInstance(out, NotFound)
+        self.assertIn("retrieval_error:TableRetrievalError", out.warnings)
+
+    def test_failed_retrieval_is_asked_once_per_source(self):
+        store = store_of(
+            (doc("VJC22C", 2022), [is_table("VJC22C", is_rows(2022, interest=False))]),
+            (doc("VJC23C", 2023), base_tables()),
+        )
+        r = FakeRetriever(error=TableRetrievalError("x"))
+        LeafExtractor(store, tree, templates, retriever=r).extract(
+            "VJC", "consolidated", [LeafRequest("interest_expense", 2022, "flow"), INTEREST_2023])
+        self.assertEqual(sorted(r.calls), [("VJC", "consolidated", 2022, "interest_expense"),
+                                           ("VJC", "consolidated", 2023, "interest_expense")])
+
+
+class RetrievalLocatorTests(unittest.TestCase):
+    def test_locator_receives_only_ranked_views(self):
+        for name, retriever, seen in (
+            ("ranked", _interest("VJC23C:table:2"), [["VJC23C:table:2"]]),
+            ("empty answer", FakeRetriever(), [["VJC23C:table:1", "VJC23C:table:2"]]),
+            ("retrieval error", FakeRetriever(error=TableRetrievalError("x")),
+             [["VJC23C:table:1", "VJC23C:table:2"]]),
+        ):
+            with self.subTest(name):
+                locator = ViewsLocator(_not_present)
+                out = one_with(retriever, _no_interest_store(), fallback=locator)
+                self.assertIsInstance(out, NotFound)
+                self.assertEqual(locator.views, seen)
+                self.assertEqual(len(retriever.calls), 1)  # the locator's ranking is a cache hit
+
+    def test_locator_found_in_ranked_table_is_retrieved(self):
+        locator = StubLocator(read_label("Lãi tiền gửi ngân hàng", col=2))
+        out = one_with(_interest("VJC23C:table:2"), _no_interest_store(), fallback=locator)
+        self.assertEqual(out.extracted.method, "llm_located")
+        self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:2")
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
+
+    def test_locator_found_outside_ranked_tables_is_full_scan(self):
+        for name, retriever in (("empty answer", FakeRetriever()),
+                                ("retrieval error", FakeRetriever(error=TableRetrievalError("x")))):
+            with self.subTest(name):
+                locator = StubLocator(read_label("- Trong đó: Chi phí lãi vay"))
+                out = one_with(retriever, _no_interest_store(), fallback=locator)
+                self.assertEqual(out.extracted.method, "llm_located")
+                self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:1")
+                self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
+
+    def test_located_found_keeps_retrieval_warnings(self):
+        locator = StubLocator(read_label("- Trong đó: Chi phí lãi vay"))
+        out = one_with(FakeRetriever(error=TableRetrievalError("x")), _no_interest_store(), fallback=locator)
+        self.assertIn("retrieval_error:TableRetrievalError", out.extracted.warnings)
+
+    def test_next_year_locator_uses_next_year_ranking(self):
+        only_next = store_of((doc("VJC24C", 2024), [is_table("VJC24C", is_rows(2024, interest=False)),
+                                                    record("VJC24C", 2, 30, _NOTE_ROWS, kind="note")]))
+        r = FakeRetriever({(2024, "interest_expense"): ranked("VJC24C:table:1")})
+        locator = ViewsLocator(read_label("- Trong đó: Chi phí lãi vay", col=4))
+        out = one_with(r, only_next, fallback=locator)
+        self.assertEqual(locator.views, [["VJC24C:table:1"]])
+        self.assertEqual(r.calls, [("VJC", "consolidated", 2024, "interest_expense")])
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
+        self.assertIn("primary_report_missing", out.extracted.warnings)
+
+    def test_no_retriever_locator_has_no_trace(self):
+        locator = ViewsLocator(read_label("- Trong đó: Chi phí lãi vay"))
+        out = one_with(None, _no_interest_store(), fallback=locator)
+        self.assertEqual(locator.views, [["VJC23C:table:1", "VJC23C:table:2"]])
+        self.assertIsNone(out.extracted.retrieval)
 
 
 if __name__ == "__main__":
