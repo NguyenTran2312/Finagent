@@ -2,7 +2,7 @@ dataset:
   repo_id: AIGuruTinix/ViFinQA
   cache_dir: data/caches/huggingface
 embedding:
-  model_name: BAAI/bgem3
+  model_name: BAAI/bge-m3
   batch_size: 32
   max_seq_length: 512
 chroma:

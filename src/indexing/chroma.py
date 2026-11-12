@@ -6,12 +6,24 @@ import json
 import math
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
 from config.settings import (
     DENSE_MODEL_NAME, DENSE_MAX_SEQ_LENGTH, CHROMA_CACHE_ROOT, CHROMA_INDEX_VERSION
 )
+
+_PROGRESS_EVERY_BATCHES = 20  # ~5k documents between progress lines
+
+
+def _embedding_dtype(embeddings) -> str | None:
+    client = getattr(embeddings, "_client", None)
+    parameters = getattr(client, "parameters", None)
+    if not callable(parameters):
+        return None
+    first = next(iter(parameters()), None)
+    return str(first.dtype).removeprefix("torch.") if first is not None else None
 
 
 def chroma_cache_identity(documents, embeddings) -> str:
@@ -24,6 +36,9 @@ def chroma_cache_identity(documents, embeddings) -> str:
         "version": CHROMA_INDEX_VERSION,
         "document_id_scheme": "table-key-or-chunk-id-v1",
     }
+    # Only half precision is recorded, so existing fp32 cache fingerprints stay unchanged.
+    if _embedding_dtype(embeddings) == "float16":
+        configuration["dtype"] = "float16"
     digest.update(json.dumps(configuration, sort_keys=True).encode("utf-8"))
     for document in documents:
         digest.update(json.dumps(
@@ -157,6 +172,7 @@ def load_or_build_chroma(documents, embeddings, *, cache_root: Path = CHROMA_CAC
         raise ValueError(f"Chroma cache is incomplete: {len(missing)} missing table IDs")
     # Bound embedding memory as well as Chroma's maximum ingestion batch size.
     batch_size = min(256, client.get_max_batch_size())
+    started = time.monotonic()
     for offset in range(0, len(missing), batch_size):
         batch = missing[offset:offset + batch_size]
         store.add_texts(
@@ -164,5 +180,12 @@ def load_or_build_chroma(documents, embeddings, *, cache_root: Path = CHROMA_CAC
             metadatas=[metadatas[index] for index in batch],
             ids=[ids[index] for index in batch],
         )
+        done = offset + len(batch)
+        if done == len(missing) or (offset // batch_size) % _PROGRESS_EVERY_BATCHES == 0:
+            elapsed = time.monotonic() - started
+            rate = done / elapsed if elapsed > 0 else 0.0
+            remaining = (len(missing) - done) / rate if rate else float("nan")
+            print(f"Chroma add: {done:,}/{len(missing):,} ({rate:.1f}/s, ~{remaining / 60:.0f} min left)",
+                  flush=True)
     print(f"Chroma cache: {root} ({len(ids)} tables, {len(missing)} added)")
     return store
