@@ -52,6 +52,11 @@ Corpus facts this design is built on (read-only probes of the local copy
 7. **Report-direct evidence (approach A).** Leaf extraction reads the report's tables through a
    read-only `ReportStore`; it does not use the hybrid retriever, reranker or Chroma. Retrieval
    remains the evidence path for free-text answering in sub-project 3.
+   *Amended 2026-11-12:* superseded by
+   `docs/superpowers/specs/2026-11-12-retrieval-guided-extraction-design.md`. An optional
+   injected `TableRetriever` (hybrid BM25 + dense, top 10 tables) now selects the tables read
+   first, with a full-report scan when they yield no row; `retriever=None` keeps the behaviour
+   described in this document, which remains the reference for everything else.
 
 Rejected approaches: (B) one hybrid retrieval + rerank per leaf request — up to ~84 rerank
 passes for a 7-company × 3-year × 4-leaf question, top-k can miss the statement table, results
@@ -61,7 +66,8 @@ derived metric do not retrieve the leaf rows its formula needs.
 ## 3. Components
 
 New package `src/extraction/`. Production modules import via `src.*`. No retrieval, embedding,
-GPU or network dependency; database access only through `ReportStore`.
+GPU or network dependency; database access only through `ReportStore`. (The 2026-11-12
+amendment adds only a retriever *protocol* here; its implementation lives in `src/retrieval`.)
 
 | Module | Responsibility |
 |---|---|
@@ -555,7 +561,8 @@ Verification: `python -m unittest discover -s tests -v` and
 Wiring extraction into `query_pipeline` or the reasoning loop (sub-project 3); ad-hoc note
 items not in the tree; header inheritance for continuation tables; securities and insurance
 templates; LLM model choice and live-provider verification; any change to retrieval, scoring,
-paraphrasing, the PostgreSQL schema or Chroma.
+paraphrasing, the PostgreSQL schema or Chroma. (Retrieval-guided table selection is designed
+separately in `2026-11-12-retrieval-guided-extraction-design.md`.)
 
 ## 12. Risks and open items
 
