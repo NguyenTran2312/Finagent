@@ -3,7 +3,8 @@
 Per request: the primary report (year y, current column) and, when it gives ``ReportMissing`` or
 ``NotFound``, the next report (year y+1, comparative column). Each document of a source is read
 on its own (§5.5); ``_combine_variants`` and ``_combine_sources`` are pure functions over those
-per-document outcomes (§5.4, §5.3).
+per-document outcomes (§5.4, §5.3). With a ``TableRetriever`` injected, each document is read on
+the source's ranked tables first and in full only when they hold no row (``_read_document``).
 
 ``NotFound`` reasons set here: ``no_row`` (no matching row in any candidate table),
 ``section_unresolved`` (the same for a section or child leaf, §6.4) and ``no_period_column``
@@ -37,6 +38,7 @@ from src.extraction.outcomes import (
     UnsupportedTemplate,
 )
 from src.extraction.report_store import ReportDoc, ReportSession, ReportStore
+from src.extraction.retrieval import RetrievalTrace, TableRetriever, ranking_of
 from src.extraction.table_view import CellRead, MalformedTable, SourceRole, TableView
 from src.extraction.templates import TickerTemplates
 
@@ -84,16 +86,37 @@ class _Doc:
     views: tuple[TableView, ...]
     skipped: tuple[str, ...]
     warnings: tuple[str, ...]
+    chunk_ids: frozenset[str]  # every loaded record's chunk id, skipped tables included
+
+
+@dataclass(frozen=True)
+class _Ranking:
+    """One source's retrieval answer: chunk_id -> rank, or ``None`` when retrieval failed (full scan)."""
+
+    ranks: dict[str, int] | None
+    warnings: tuple[str, ...]
 
 
 class _Call:
     """The session and per-call caches of one ``extract`` call; nothing outlives the call."""
 
-    def __init__(self, session: ReportSession, ticker: str):
+    def __init__(self, session: ReportSession, ticker: str, retriever: TableRetriever | None = None):
         self.ticker = ticker
+        self.retriever = retriever
         self._session = session
         self._docs: dict[int, list[ReportDoc]] = {}
         self._loaded: dict[str, _Doc] = {}
+        self._rankings: dict[tuple[int, str], _Ranking] = {}
+
+    def ranking(self, year: int, scope: Scope, leaf: LeafDef, docs: tuple[_Doc, ...]) -> _Ranking | None:
+        """The retriever's ranking for one source, asked once per ``(year, leaf.id)``; ``None`` without one."""
+        if self.retriever is None:
+            return None
+        key = (year, leaf.id)
+        if key not in self._rankings:
+            ranks = ranking_of(self.retriever.rank(self.ticker, scope, year, leaf))
+            self._rankings[key] = _Ranking(ranks, ())
+        return self._rankings[key]
 
     def documents(self, year: int, scope: str) -> tuple[tuple[_Doc, ...], tuple[str, ...]]:
         """Documents of ``scope`` for ``year``, and the sorted scopes of all documents of that year."""
@@ -104,15 +127,17 @@ class _Call:
 
     def _load(self, doc: ReportDoc) -> _Doc:
         if doc.doc_id not in self._loaded:
-            views, skipped, warnings = [], [], []
+            views, skipped, warnings, chunk_ids = [], [], [], set()
             for record in self._session.tables(doc.doc_id):
+                if record.chunk_id is not None:
+                    chunk_ids.add(record.chunk_id)
                 try:
                     views.append(TableView(record, doc.report_year))
                 except MalformedTable as exc:
                     code = "table_without_chunk" if exc.reason == "no_chunk" else "skipped_table"
                     skipped.append(exc.table_key)
                     warnings.append(f"{code}:{exc.table_key}")
-            self._loaded[doc.doc_id] = _Doc(doc, tuple(views), tuple(skipped), tuple(warnings))
+            self._loaded[doc.doc_id] = _Doc(doc, tuple(views), tuple(skipped), tuple(warnings), frozenset(chunk_ids))
         return self._loaded[doc.doc_id]
 
 
@@ -151,16 +176,18 @@ class LeafExtractor:
         tree: MetricTree,
         templates: TickerTemplates,
         fallback: CellLocator | None = None,
+        retriever: TableRetriever | None = None,
     ):
         self._store = store
         self._tree = tree
         self._templates = templates
         self._fallback = fallback
+        self._retriever = retriever
 
     def extract(self, ticker: str, scope: Scope, requests: Sequence[LeafRequest]) -> ExtractionResult:
         ticker, template, distinct, leaves = self._validate(ticker, scope, requests)
         with self._store.session() as session:  # E1: exactly one session per call
-            call = _Call(session, ticker)
+            call = _Call(session, ticker, self._retriever)
             outcomes = tuple(self._outcome(call, template, leaves.get(r), scope, r) for r in distinct)
         return ExtractionResult(ticker, scope, outcomes)
 
@@ -216,7 +243,10 @@ class LeafExtractor:
         docs, scopes = job.call.documents(year, job.scope)
         if not docs:
             return (), ReportMissing(**job.keys, available_scopes=scopes)
-        return docs, _combine_variants(job, [(d.doc, _in_document(job, d, role)) for d in docs])
+        ranking = job.call.ranking(year, job.scope, job.leaf, docs)  # P1: only a source with documents
+        mode = job.call.retriever.mode if ranking is not None else None
+        outcome = _combine_variants(job, [(d.doc, _read_document(job, d, role, ranking, mode)) for d in docs])
+        return docs, _with_warnings(outcome, ranking.warnings) if ranking is not None else outcome
 
     def _locate(self, job: _Job, docs: tuple[_Doc, ...], role: SourceRole, deterministic: NotFound) -> Outcome:
         """§5.6: one locator call per document of the source the deterministic search used."""
@@ -246,8 +276,29 @@ class LeafExtractor:
 
 
 # --- one document (§5.5, §6.5) ------------------------------------------------
-def _in_document(job: _Job, d: _Doc, role: SourceRole) -> Outcome:
-    hits = find_rows(job.leaf, d.views, job.template_leaves)
+def _read_document(job: _Job, d: _Doc, role: SourceRole, ranking: _Ranking | None, mode: str | None) -> Outcome:
+    """Retrieval §4.2: step R on the document's ranked tables, step F on all of them when R finds no row."""
+    if ranking is None:
+        return _in_document(job, d, role, d.views)
+    if ranking.ranks:
+        views_r = [v for v in d.views if v.record.chunk_id in ranking.ranks]
+        if views_r:
+            outcome = _in_document(job, d, role, views_r)
+            if not isinstance(outcome, NotFound):
+                rank = ranking.ranks[outcome.extracted.fact.source.chunk_id] if isinstance(outcome, Found) else None
+                return _traced(outcome, mode, "retrieved", rank)
+    return _traced(_in_document(job, d, role, d.views), mode, "full_scan", None)
+
+
+def _traced(outcome: Outcome, mode: str, step: str, rank: int | None) -> Outcome:
+    """Sets the retrieval trace on a ``Found``; any other outcome is returned unchanged."""
+    if isinstance(outcome, Found):
+        return replace(outcome, extracted=replace(outcome.extracted, retrieval=RetrievalTrace(mode, step, rank)))
+    return outcome
+
+
+def _in_document(job: _Job, d: _Doc, role: SourceRole, views: Sequence[TableView]) -> Outcome:
+    hits = find_rows(job.leaf, views, job.template_leaves)
     hit_reads = []
     for hit in hits:
         cols = hit.view.period_columns(job.request.year, job.request.period_kind, role)
