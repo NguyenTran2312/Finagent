@@ -1,9 +1,13 @@
 """Extract question filters and rank matching chunks with the existing BM25 index."""
 
 import re
+from typing import TYPE_CHECKING
 
 from src.preprocess.cleaner import fold_text
 from src.retrieval.filters import normalize_metadata_filters
+
+if TYPE_CHECKING:
+    from langchain_core.documents import Document
 
 
 def refine_question(question: str, known_tickers: set[str], *,
@@ -70,6 +74,25 @@ def filter_document_indices(documents: list, filters: dict) -> list[int]:
     return indices
 
 
+def rank_indices(retriever, question: str, indices: list[int],
+                 k: int) -> "tuple[list[Document], list[float]]":
+    """BM25-score ``retriever.docs`` at ``indices``; return the top ``k`` with non-zero scores."""
+    import numpy as np
+
+    documents = []
+    selected_scores = []
+    if indices:
+        scores = retriever.vectorizer.get_batch_scores(retriever.preprocess_func(question), indices)
+        ranked_positions = np.argsort(scores)[::-1]
+        positions = [
+            int(position) for position in ranked_positions
+            if scores[int(position)] != 0
+        ][:k]
+        documents = [retriever.docs[indices[position]] for position in positions]
+        selected_scores = [float(scores[position]) for position in positions]
+    return documents, selected_scores
+
+
 def retrieve_refined(retriever, question: str, k: int | None = None, *,
                      filter_question: str | None = None,
                      metadata_filters=None) -> dict:
@@ -79,8 +102,6 @@ def retrieve_refined(retriever, question: str, k: int | None = None, *,
     metadata_filters (dict or pydantic model with tickers/years/scopes) replaces text
     extraction and cannot be combined with filter_question.
     """
-    import numpy as np
-
     if not isinstance(question, str) or not question.strip():
         raise ValueError("question must be a non-empty string")
     if metadata_filters is not None:
@@ -94,17 +115,7 @@ def retrieve_refined(retriever, question: str, k: int | None = None, *,
     if type(k) is not int or k < 1:
         raise ValueError("k must be a positive integer")
     indices = filter_document_indices(retriever.docs, filters)
-    documents = []
-    selected_scores = []
-    if indices:
-        scores = retriever.vectorizer.get_batch_scores(retriever.preprocess_func(question), indices)
-        ranked_positions = np.argsort(scores)[::-1]
-        positions = [
-            int(position) for position in ranked_positions
-            if scores[int(position)] != 0
-        ][:k]
-        documents = [retriever.docs[indices[position]] for position in positions]
-        selected_scores = [float(scores[position]) for position in positions]
+    documents, selected_scores = rank_indices(retriever, question, indices, k)
     return {
         "documents": documents,
         "scores": selected_scores,

@@ -3,8 +3,14 @@ from unittest.mock import Mock
 
 from langchain_core.documents import Document
 
-from main.refine_questions import refine_question, retrieve_refined
+from main.refine_questions import (
+    filter_document_indices,
+    rank_indices,
+    refine_question,
+    retrieve_refined,
+)
 from retrieval.bm25 import build_bm25
+from retrieval.filters import normalize_metadata_filters
 
 
 class RefineQuestionsTests(unittest.TestCase):
@@ -101,6 +107,31 @@ class RefineQuestionsTests(unittest.TestCase):
 
         self.assertEqual(result["documents"], [])
         self.assertEqual(result["scores"], [])
+
+    def test_rank_indices_matches_retrieve_refined(self) -> None:
+        documents = [
+            Document(page_content=text, metadata={
+                "ticker": ticker, "report_year": 2024, "scope": "consolidated"})
+            for ticker, text in (
+                ("AAA", "doanh thu thuần doanh thu"),
+                ("AAA", "doanh thu bán hàng"),
+                ("AAA", "lợi nhuận gộp"),
+                ("AAA", "doanh thu tài chính doanh thu doanh thu"),
+                ("BBB", "doanh thu"),
+            )
+        ]
+        bm25 = build_bm25(documents, k=5)
+        filters = normalize_metadata_filters(
+            {"tickers": ["AAA"], "years": [2024], "scopes": ["consolidated"]})
+        indices = filter_document_indices(bm25.docs, filters)
+
+        docs, scores = rank_indices(bm25, "doanh thu", indices, 4)
+
+        expected = retrieve_refined(bm25, "doanh thu", k=4, metadata_filters=filters)
+        self.assertEqual(docs, expected["documents"])
+        self.assertEqual(scores, expected["scores"])
+        self.assertEqual(len(docs), 3)  # the zero-score "lợi nhuận gộp" is dropped
+        self.assertEqual(rank_indices(bm25, "doanh thu", [], 3), ([], []))
 
 
 if __name__ == "__main__":

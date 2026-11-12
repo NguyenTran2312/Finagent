@@ -4,10 +4,19 @@ Implements the ``TableRetriever`` protocol of ``src.extraction.retrieval``. This
 module must stay import-light: torch, chromadb and embedding models are loaded
 lazily by the code that opens the real indexes, never at import time. The source Chroma
 index is never opened in place; a snapshot copy is opened instead (see ``open_table_retriever``).
+
+Both branches search a per-report candidate set (spec §5.5): the BM25 documents of one
+``(ticker, report_year, scope)`` are found once and kept in an LRU of ``CANDIDATE_CACHE_SIZE``
+reports. BM25 scores only those documents (``rank_indices``). The dense branch fetches their
+stored vectors once per report (``store.get``) and scores them exactly by dot product with the
+query embedding (normalised vectors, so cosine), which is cached per query text; Chroma's
+filtered ``similarity_search`` is not used.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from config.settings import PROJECT_ROOT, RRF_CONSTANT
@@ -16,12 +25,13 @@ from src.extraction.retrieval import RankedTable, TableRetrievalError
 from src.indexing.bm25_store import load_bm25, sqlite_source_identity
 from src.indexing.chroma import chroma_snapshot
 from src.indexing.table_semantics import StatementKind
-from src.main.refine_questions import retrieve_refined
+from src.main.refine_questions import filter_document_indices, rank_indices
 from src.retrieval.filters import normalize_metadata_filters
 from src.retrieval.hybrid import rrf_fuse
 
 MODES = ("hybrid", "bm25")
 COLLECTION = "vifinqa_tables"
+CANDIDATE_CACHE_SIZE = 32
 
 STATEMENT_NAMES: dict[StatementKind, str] = {
     StatementKind.BALANCE_SHEET: "bảng cân đối kế toán",
@@ -39,6 +49,15 @@ def _is_int(value: object) -> bool:
     return type(value) is int
 
 
+@dataclass
+class _Candidates:
+    """One report's BM25 document positions and chunk ids; ``dense`` is filled on first use."""
+
+    indices: list[int]
+    chunk_ids: list[str]
+    dense: tuple | None = field(default=None, repr=False)  # (matrix, metadatas), aligned rows
+
+
 class HybridTableRetriever:
     def __init__(self, bm25, dense_store, *, mode: str = "hybrid", k: int = 10, depth: int = 20):
         if mode not in MODES:
@@ -51,20 +70,23 @@ class HybridTableRetriever:
             raise ValueError("hybrid mode requires a dense store")
         self.bm25, self.dense_store = bm25, dense_store
         self.mode, self.k, self.depth = mode, k, depth
+        self._cache: OrderedDict[tuple, _Candidates] = OrderedDict()
+        self._query_vectors: dict[str, list[float]] = {}
 
     def rank(self, ticker: str, scope: str, report_year: int, leaf: LeafDef) -> tuple[RankedTable, ...]:
         query = table_query(leaf)
         filters = normalize_metadata_filters(
             {"tickers": [ticker.strip().upper()], "years": [report_year], "scopes": [scope]}
         )
+        candidates = self._candidates(filters)
+        if not candidates.indices:
+            return ()
         try:
             if self.mode == "bm25":
-                documents = retrieve_refined(self.bm25, query, k=self.k, metadata_filters=filters)["documents"]
+                documents = rank_indices(self.bm25, query, candidates.indices, self.k)[0]
             else:
-                lexical = retrieve_refined(
-                    self.bm25, query, k=self.depth, metadata_filters=filters)["documents"]
-                dense = self.dense_store.similarity_search(
-                    query, k=self.depth, filter=_where(filters))
+                lexical = rank_indices(self.bm25, query, candidates.indices, self.depth)[0]
+                dense = self._dense(query, candidates)
         except Exception as exc:
             raise TableRetrievalError(f"{self.mode} retrieval failed: {type(exc).__name__}") from exc
         if self.mode == "hybrid":
@@ -74,16 +96,41 @@ class HybridTableRetriever:
             for index, document in enumerate(documents, 1)
         )
 
+    def _candidates(self, filters: dict) -> _Candidates:
+        key = (filters["tickers"][0], filters["years"][0], tuple(filters["scopes"]))
+        candidates = self._cache.get(key)
+        if candidates is not None:
+            self._cache.move_to_end(key)
+            return candidates
+        indices = filter_document_indices(self.bm25.docs, filters)
+        candidates = _Candidates(indices, [self.bm25.docs[i].metadata["chunk_id"] for i in indices])
+        self._cache[key] = candidates
+        while len(self._cache) > CANDIDATE_CACHE_SIZE:
+            self._cache.popitem(last=False)
+        return candidates
 
-def _where(filters: dict) -> dict:
-    scopes = filters["scopes"]
-    if "separate" in scopes:
-        scopes = [*scopes, "parent"]
-    return {"$and": [
-        {"ticker": {"$in": filters["tickers"]}},
-        {"report_year": {"$in": filters["years"]}},
-        {"scope": {"$in": scopes}},
-    ]}
+    def _dense(self, query: str, candidates: _Candidates) -> list:
+        """Top ``depth`` candidates by exact cosine; ties keep candidate order."""
+        import numpy as np
+        from langchain_core.documents import Document
+
+        if candidates.dense is None:
+            fetched = self.dense_store.get(ids=candidates.chunk_ids, include=["embeddings", "metadatas"])
+            rows = {chunk_id: position for position, chunk_id in enumerate(fetched["ids"])}
+            order = [rows[chunk_id] for chunk_id in candidates.chunk_ids if chunk_id in rows]
+            embeddings = fetched["embeddings"]
+            matrix = np.asarray([embeddings[position] for position in order], dtype=np.float32)
+            candidates.dense = (matrix, [fetched["metadatas"][position] for position in order])
+        matrix, metadatas = candidates.dense
+        if not metadatas:
+            return []
+        vector = self._query_vectors.get(query)
+        if vector is None:
+            vector = self.dense_store.embeddings.embed_query(query)
+            self._query_vectors[query] = vector
+        scores = matrix @ np.asarray(vector, dtype=np.float32)
+        top = np.argsort(-scores, kind="stable")[:self.depth]
+        return [Document(page_content="", metadata=dict(metadatas[int(i)])) for i in top]
 
 
 def _chroma_client(path):

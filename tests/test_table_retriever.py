@@ -1,17 +1,21 @@
 import argparse
+import math
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 from langchain_core.documents import Document
 
 from config.settings import RRF_CONSTANT
 from src.calculation.metric_tree import MetricTree
 from src.extraction.retrieval import RankedTable, TableRetrievalError
 from src.indexing.bm25_store import save_bm25, sqlite_source_identity
+from src.main.refine_questions import filter_document_indices, rank_indices
 from src.retrieval import table_retriever
 from src.retrieval.bm25 import build_bm25
+from src.retrieval.filters import normalize_metadata_filters
 from src.retrieval.hybrid import rrf_fuse
 from src.retrieval.table_retriever import (
     HybridTableRetriever,
@@ -51,15 +55,63 @@ DOCS = [
 bm25 = build_bm25(DOCS, k=5)
 
 
-class FakeDenseStore:
-    def __init__(self, docs=(), error=None):
-        self.docs, self.error, self.calls = list(docs), error, []
+def unit(*values):
+    norm = math.sqrt(sum(value * value for value in values))
+    return [value / norm for value in values]
 
-    def similarity_search(self, query, k, filter=None):
-        self.calls.append((query, k, filter))
+
+# Cosine order against QUERY_VECTOR: VJC23C:2, VJC23C:1, VJC23C:3 (others below).
+VECTORS = {
+    "VJC23C:1": unit(0.8, 0.6), "VJC23C:2": unit(1.0, 0.0), "VJC23C:3": unit(0.0, 1.0),
+    "VJC23S:1": unit(0.6, 0.8), "VJC23P:1": unit(0.9, 0.1),
+    "VJC22C:1": unit(1.0, 0.1), "ACB23C:1": unit(1.0, 0.2),
+}
+QUERY_VECTOR = unit(1.0, 0.0)
+
+
+class FakeEmbeddings:
+    def __init__(self, store):
+        self.store = store
+
+    def embed_query(self, text):
+        self.store.embedded.append(text)
+        if self.store.embed_error:
+            raise self.store.embed_error
+        return list(self.store.query_vectors.get(text, QUERY_VECTOR))
+
+
+class FakeDenseStore:
+    """Chroma-like store: ``get`` returns rows in reverse order of the ids asked for."""
+
+    def __init__(self, docs=DOCS, error=None, *, vectors=VECTORS, query_vectors=None,
+                 metadatas=None, embed_error=None):
+        self.metadatas = {d.metadata["chunk_id"]: dict(d.metadata) for d in docs}
+        self.metadatas.update(metadatas or {})
+        self.vectors, self.query_vectors = dict(vectors), dict(query_vectors or {})
+        self.error, self.embed_error = error, embed_error
+        self.calls, self.embedded, self.similarity_calls = [], [], 0
+        self.embeddings = FakeEmbeddings(self)
+
+    @property
+    def get_calls(self):
+        return len(self.calls)
+
+    @property
+    def embed_calls(self):
+        return len(self.embedded)
+
+    def get(self, ids=None, include=None):
+        self.calls.append((list(ids), list(include)))
         if self.error:
             raise self.error
-        return self.docs
+        found = [i for i in ids if i in self.metadatas][::-1]
+        return {"ids": found,
+                "embeddings": np.array([self.vectors[i] for i in found]),
+                "metadatas": [self.metadatas[i] for i in found]}
+
+    def similarity_search(self, query, k, filter=None):
+        self.similarity_calls += 1
+        raise AssertionError("similarity_search must not be called")
 
 
 class HybridTableRetrieverTests(unittest.TestCase):
@@ -78,26 +130,26 @@ class HybridTableRetrieverTests(unittest.TestCase):
         self.assertTrue(all(t.chunk_id.startswith("VJC23C:") for t in out))
 
     def test_separate_scope_also_accepts_parent(self):
-        store = FakeDenseStore([])
-        HybridTableRetriever(bm25, store, k=2, depth=3).rank("VJC", "separate", 2023, leaf_is)
-        query, k, where = store.calls[0]
-        self.assertEqual(query, table_query(leaf_is))
-        self.assertEqual(k, 3)
-        self.assertIn({"scope": {"$in": ["separate", "parent"]}}, where["$and"])
-        self.assertIn({"ticker": {"$in": ["VJC"]}}, where["$and"])
-        self.assertIn({"report_year": {"$in": [2023]}}, where["$and"])
+        store = FakeDenseStore()
+        out = HybridTableRetriever(bm25, store, k=2, depth=3).rank("VJC", "separate", 2023, leaf_is)
+        ids, include = store.calls[0]
+        self.assertEqual(store.embedded, [table_query(leaf_is)])
+        self.assertEqual(sorted(ids), ["VJC23P:1", "VJC23S:1"])  # ticker, year and scope filtered
+        self.assertEqual(include, ["embeddings", "metadatas"])
+        self.assertEqual({t.chunk_id for t in out}, {"VJC23S:1", "VJC23P:1"})
         out = HybridTableRetriever(bm25, None, mode="bm25", k=5, depth=5).rank("VJC", "separate", 2023, leaf_is)
         self.assertEqual({t.chunk_id for t in out}, {"VJC23S:1", "VJC23P:1"})
 
     def test_hybrid_fuses_both_branches(self):
-        a, b = DOCS[0], DOCS[1]
-        store = FakeDenseStore([b, a])
+        a, b, c = DOCS[0], DOCS[1], DOCS[2]
+        store = FakeDenseStore()  # dense order by cosine: b, a, c
         r = HybridTableRetriever(bm25, store, k=2, depth=5)
         out = r.rank("VJC", "consolidated", 2023, leaf_is)
         lexical = HybridTableRetriever(bm25, None, mode="bm25", k=5, depth=5).rank(
             "VJC", "consolidated", 2023, leaf_is)
         lexical_docs = [d for t in lexical for d in DOCS if d.metadata["chunk_id"] == t.chunk_id]
-        expected = [d.metadata["chunk_id"] for d in rrf_fuse(lexical_docs, [b, a], k=2, c=RRF_CONSTANT)]
+        expected = [d.metadata["chunk_id"]
+                    for d in rrf_fuse(lexical_docs, [b, a, c], k=2, c=RRF_CONSTANT)]
         self.assertEqual([t.chunk_id for t in out], expected)
         self.assertEqual([t.rank for t in out], [1, 2])
         self.assertEqual(len(out), 2)  # three candidates exist (C:1, C:2, C:3)
@@ -111,17 +163,16 @@ class HybridTableRetrieverTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "hybrid retrieval failed: RuntimeError")
 
     def test_missing_metadata_is_not_wrapped(self):
-        broken = Document(id="x", page_content=TEXT, metadata={"ticker": "VJC"})
-        store = FakeDenseStore([broken])
+        store = FakeDenseStore(metadatas={"VJC23C:3": {"ticker": "VJC"}})
         with self.assertRaises(KeyError):
             HybridTableRetriever(bm25, store, k=2, depth=5).rank("VJC", "consolidated", 2023, leaf_is)
 
     def test_bad_scope_is_input_error(self):
-        store = FakeDenseStore([])
+        store = FakeDenseStore()
         with self.assertRaises(ValueError) as caught:
             HybridTableRetriever(bm25, store).rank("VJC", "nonsense", 2023, leaf_is)
         self.assertNotIsInstance(caught.exception, TableRetrievalError)
-        self.assertEqual(store.calls, [])
+        self.assertEqual((store.calls, store.embedded), ([], []))
 
     def test_constructor_validates(self):
         for kwargs in ({"mode": "dense"}, {"k": 0}, {"k": 10, "depth": 5}, {"mode": "hybrid"},
@@ -132,6 +183,120 @@ class HybridTableRetrieverTests(unittest.TestCase):
     def test_defaults(self):
         r = HybridTableRetriever(bm25, FakeDenseStore())
         self.assertEqual((r.mode, r.k, r.depth), ("hybrid", 10, 20))
+
+
+def report_filters(ticker, year, scope):
+    return normalize_metadata_filters({"tickers": [ticker], "years": [year], "scopes": [scope]})
+
+
+class CandidateCacheTests(unittest.TestCase):
+    def test_cache_size(self):
+        self.assertEqual(table_retriever.CANDIDATE_CACHE_SIZE, 32)
+
+    def test_candidates_computed_once_per_report(self):
+        r = HybridTableRetriever(bm25, FakeDenseStore(), k=2, depth=3)
+        with patch.object(table_retriever, "filter_document_indices",
+                          wraps=table_retriever.filter_document_indices) as spy:
+            r.rank("VJC", "consolidated", 2023, leaf_is)
+            r.rank("vjc", "consolidated", 2023, leaf_bs)
+            self.assertEqual(spy.call_count, 1)
+            r.rank("VJC", "consolidated", 2022, leaf_is)
+            self.assertEqual(spy.call_count, 2)
+        spy.assert_called_with(bm25.docs, report_filters("VJC", 2022, "consolidated"))
+
+    def test_least_recently_used_report_is_evicted(self):
+        r = HybridTableRetriever(bm25, None, mode="bm25", k=2, depth=2)
+        with patch.object(table_retriever, "CANDIDATE_CACHE_SIZE", 2), \
+                patch.object(table_retriever, "filter_document_indices",
+                             wraps=table_retriever.filter_document_indices) as spy:
+            for year in (2023, 2022, 2023, 2024, 2023):  # the 2023 hit keeps it; 2022 is evicted
+                r.rank("VJC", "consolidated", year, leaf_is)
+            self.assertEqual(spy.call_count, 3)
+            r.rank("VJC", "consolidated", 2022, leaf_is)
+            self.assertEqual(spy.call_count, 4)
+
+    def test_dense_vectors_fetched_once_and_query_embedded_once(self):
+        store = FakeDenseStore()
+        r = HybridTableRetriever(bm25, store, k=2, depth=3)
+        first = r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertEqual(r.rank("VJC", "consolidated", 2023, leaf_is), first)
+        self.assertEqual(store.get_calls, 1)
+        self.assertEqual(store.embed_calls, 1)
+        self.assertEqual(store.similarity_calls, 0)
+        self.assertEqual(sorted(store.calls[0][0]), ["VJC23C:1", "VJC23C:2", "VJC23C:3"])
+        r.rank("VJC", "consolidated", 2022, leaf_is)  # same query text, another report
+        self.assertEqual((store.get_calls, store.embed_calls), (2, 1))
+        r.rank("VJC", "consolidated", 2023, leaf_bs)  # another query text, cached report
+        self.assertEqual((store.get_calls, store.embed_calls), (2, 2))
+        self.assertEqual(store.embedded, [table_query(leaf_is), table_query(leaf_bs)])
+
+    def test_dense_order_is_exact_cosine(self):
+        docs = [doc("VJC23C:1", "VJC", 2023, "consolidated", "alpha"),
+                doc("VJC23C:2", "VJC", 2023, "consolidated", "beta"),
+                doc("VJC23C:3", "VJC", 2023, "consolidated", "gamma")]
+        lexical = build_bm25(docs, k=3)
+        store = FakeDenseStore(docs, vectors={
+            "VJC23C:1": unit(1.0, 0.5), "VJC23C:2": unit(0.0, 1.0), "VJC23C:3": unit(1.0, 0.1)})
+        r = HybridTableRetriever(lexical, store, k=3, depth=3)
+        out = r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertEqual([t.chunk_id for t in out], ["VJC23C:3", "VJC23C:1", "VJC23C:2"][:r.k])
+        bm25_only = HybridTableRetriever(lexical, None, mode="bm25", k=3, depth=3)
+        self.assertEqual(bm25_only.rank("VJC", "consolidated", 2023, leaf_is), ())  # no shared tokens
+
+    def test_dense_ties_keep_candidate_order(self):
+        docs = [doc(f"VJC23C:{n}", "VJC", 2023, "consolidated", "alpha") for n in (1, 2, 3)]
+        store = FakeDenseStore(docs, vectors={f"VJC23C:{n}": unit(1.0, 1.0) for n in (1, 2, 3)})
+        r = HybridTableRetriever(build_bm25(docs, k=3), store, k=3, depth=3)
+        out = r.rank("VJC", "consolidated", 2023, leaf_is)  # get returns rows reversed
+        self.assertEqual([t.chunk_id for t in out], ["VJC23C:1", "VJC23C:2", "VJC23C:3"])
+
+    def test_hybrid_equals_rrf_of_cached_branches(self):
+        query = table_query(leaf_is)
+        indices = filter_document_indices(bm25.docs, report_filters("VJC", 2023, "consolidated"))
+        exact_dense = [DOCS[1], DOCS[0], DOCS[2]]  # cosine order of the three candidates
+        # (1, 1): an untruncated dense list would put VJC23C:3 first instead of VJC23C:2.
+        for k, depth, first in ((2, 2, "VJC23C:2"), (1, 1, "VJC23C:2"), (2, 3, "VJC23C:2")):
+            with self.subTest(k=k, depth=depth):
+                r = HybridTableRetriever(bm25, FakeDenseStore(), k=k, depth=depth)
+                lexical = rank_indices(bm25, query, indices, depth)[0]
+                expected = [d.metadata["chunk_id"] for d in
+                            rrf_fuse(lexical, exact_dense[:depth], k=k, c=RRF_CONSTANT)]
+                out = r.rank("VJC", "consolidated", 2023, leaf_is)
+                self.assertEqual([t.chunk_id for t in out], expected)
+                self.assertEqual(out[0].chunk_id, first)
+                self.assertEqual([t.rank for t in out], list(range(1, k + 1)))
+
+    def test_dense_get_error_is_wrapped(self):
+        store = FakeDenseStore(error=RuntimeError("chroma down"))
+        r = HybridTableRetriever(bm25, store)
+        with self.assertRaises(TableRetrievalError) as caught:
+            r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        self.assertEqual(str(caught.exception), "hybrid retrieval failed: RuntimeError")
+        store.error = None  # a failed fetch is not cached; the next call fetches again
+        self.assertTrue(r.rank("VJC", "consolidated", 2023, leaf_is))
+        self.assertEqual(store.get_calls, 2)
+
+    def test_embed_and_scoring_errors_are_wrapped(self):
+        store = FakeDenseStore(embed_error=OSError("cuda"))
+        with self.assertRaises(TableRetrievalError) as caught:
+            HybridTableRetriever(bm25, store).rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        for mode, store in (("bm25", None), ("hybrid", FakeDenseStore())):
+            with self.subTest(mode=mode), \
+                    patch.object(table_retriever, "rank_indices", side_effect=MemoryError) as ranker, \
+                    self.assertRaises(TableRetrievalError) as caught:
+                HybridTableRetriever(bm25, store, mode=mode).rank("VJC", "consolidated", 2023, leaf_is)
+            self.assertEqual(str(caught.exception), f"{mode} retrieval failed: MemoryError")
+            ranker.assert_called_once()
+
+    def test_no_candidates_returns_empty_without_dense_call(self):
+        store = FakeDenseStore()
+        r = HybridTableRetriever(bm25, store)
+        self.assertEqual(r.rank("ZZZ", "consolidated", 2023, leaf_is), ())
+        self.assertEqual((store.get_calls, store.embed_calls), (0, 0))
+        bm25_only = HybridTableRetriever(bm25, None, mode="bm25")
+        self.assertEqual(bm25_only.rank("ZZZ", "consolidated", 2023, leaf_is), ())
 
 
 class FakeClient:
