@@ -8,7 +8,7 @@ from unittest import mock
 
 import src.agent
 from src.agent.agent import ReasoningAgent
-from src.agent.factory import build_agent
+from src.agent.factory import build_agent, reset_retriever_cache
 from src.agent.llm import CountingLlm
 from src.agent.types import AgentConfig
 from src.extraction.extractor import LeafExtractor
@@ -18,6 +18,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class AgentFactoryTests(unittest.TestCase):
+    def setUp(self):
+        reset_retriever_cache()
+        self.addCleanup(reset_retriever_cache)
+
+    def test_retriever_is_shared_across_configs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("src.retrieval.table_retriever.open_table_retriever",
+                            return_value=object()) as opener:
+                agents = [build_agent(AgentConfig(retriever_mode="bm25", max_repairs=n),
+                                      llm=CountingLlm(ScriptedLlm()), db=Path(tmp) / "c.sqlite3",
+                                      bm25_dir=Path(tmp) / "bm25", chroma_dir=None) for n in (1, 2)]
+                extractors = [a._extractor_factory(None) for a in agents]
+                self.assertEqual(opener.call_count, 1)
+                self.assertIs(extractors[0]._retriever, extractors[1]._retriever)
+
     def test_build_agent_without_retriever_touches_no_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             missing = Path(tmp) / "missing"
