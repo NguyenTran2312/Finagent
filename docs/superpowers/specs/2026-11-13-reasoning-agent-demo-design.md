@@ -145,7 +145,8 @@ The event `metrics` records, per subquery, the id and how it was found: `catalog
 
 ### 4.3 Solve (`solver.py`)
 
-- **LLM output schema:** `SolutionDraft(code: str, claimed_value: str, claimed_unit: str)`.
+- **LLM output schema:** `SolutionDraft(code: str, claimed_value: str, claimed_unit: str,
+  needs: list[DataNeed])`.
 - **Prompt:**
   - the question;
   - the plan's subqueries with their mapped ids;
@@ -165,14 +166,23 @@ The event `metrics` records, per subquery, the id and how it was found: `catalog
   3. Problems for the repair prompt:
      - `ExecutionFailure` (its rejections or detail);
      - `GateReport` issues of severity error.
-- **Missing facts.** An `ExecutionFailure` whose detail names `MissingFact` or
-  `MetricUnavailable` is parsed into needs. A regex matches the core's messages, and tests pin it
-  against messages produced by the real `FactSet` and helpers.
-  - A need whose leaves were never requested → a gather round (up to `max_gather_rounds`), then
-    a fresh attempt. This does not consume a repair.
-  - A need whose leaves were requested and failed → refusal `facts_missing`, citing the logged
-    outcomes.
-  - An unparsable detail → treated as an ordinary problem for repair.
+- **Declared data needs (amended 2026-11-13 while planning).** The sandbox reports only the
+  exception class name: `ExecutionFailure("runtime_error", "MissingFact")` or
+  `"MetricUnavailable"` (calculation core §10). The missing key therefore cannot be read from a
+  failure. Instead:
+  - `SolutionDraft` also carries `needs: list[DataNeed]`, with
+    `DataNeed(node_id, ticker, year, scope | None)`: every `fact()` / `metric()` /
+    `avg_balance()` the code will call.
+  - **Before running a draft**, the agent compares its needs with the needs gathered so far.
+    - New needs whose node ids exist in the tree → one gather round (at most
+      `max_gather_rounds` per question). This does not consume a repair. `avg_balance` needs also
+      fetch the prior year.
+    - A need with an unknown node id → a problem for repair, without running the code.
+  - **After a draft fails with `MissingFact` or `MetricUnavailable`:**
+    - If any declared need failed in gather (logged outcome other than `Found`) → refusal
+      `facts_missing`, citing those outcomes.
+    - Otherwise the code used data it did not declare → a problem for repair: "code used data not
+      declared in needs".
 - **Exhausted repairs.** After `1 + max_repairs` attempts without a passing report → refusal
   `gates_failed`, with the last problems.
 
@@ -247,7 +257,7 @@ real:
 |---|---|
 | `metrics.py` | catalog map; alias hit with no LLM call; LLM pick; accepted proposal; rejected proposal → `metric_unmapped` |
 | `gather.py` | Found → FactSet; each other outcome logged with its reason; the locator cap gives `locator_skipped`; no leaf is requested twice |
-| `solver.py` | bad code then good; gate errors on every attempt → `gates_failed`; MissingFact for a new need → one gather round and success; MissingFact for a failed leaf → `facts_missing`; the missing-fact regex is pinned against real core messages |
+| `solver.py` | bad code then good; gate errors on every attempt → `gates_failed`; a draft with a new declared need → one gather round, then success; MissingFact with a failed declared need → `facts_missing`; MissingFact with all declared needs found → repair with "data not declared"; an unknown node id in needs → repair without running |
 | `answer.py` | number display per unit, sources, each refusal text |
 | `agent.py` | end-to-end with fakes: event order, `answered` / `clarify` / `refused` / `error`, `qa_history` forwarded, `llm_calls` counted |
 | `present.py` | rows for each event kind |
@@ -285,8 +295,9 @@ Verification commands:
 
 - The paraphraser's catalog and the metric tree are separate. The fixed map in §4.1 is pinned by a
   test and must change with either side.
-- **The missing-fact parser depends on the core's message text.** The tests pin it. A format
-  change breaks a test rather than the loop.
+- **Declared needs can be incomplete.** The LLM may call data it did not declare. That case
+  costs a repair attempt and is reported as such. The sandbox deliberately hides exception
+  messages, so the agent cannot tell which key was missing.
 - **Many-company questions.** 40 gold questions use 9 or more operands. With the locator capped
   at 6, some refusals will be `facts_missing` where more locator calls might have helped. This
   is measured in the next spec.
