@@ -15,7 +15,7 @@ _PERIOD_TOKEN_RE = re.compile(r"(?:FY|Q[1-4]|H[12])(?:\d{2}|\d{4})?")
 FINANCE_ACRONYMS = frozenset({
     "LNST", "LNTT", "BCTC", "CTCP", "TMCP", "TNDN", "ROE", "ROA", "EPS", "VND", "USD",
     "GDP", "YOY", "QOQ", "TTM", "VAT", "IFRS", "VAS", "HOSE", "HNX", "UPCOM",
-    "EBIT", "ROIC", "NIM", "NPL", "CASA", "GTGT", "KQKD", "LCTT", "VCSH",
+    "TNHH", "MTV", "EBIT", "ROIC", "NIM", "NPL", "CASA", "GTGT", "KQKD", "LCTT", "VCSH",
 })
 
 # Legal-form wording that a question may omit: a trailing "- CTCP" / "- Công ty Cổ phần" and a
@@ -25,6 +25,9 @@ _LEGAL_SUFFIX_RE = re.compile(r"\s*[-–—]\s*(?:CTCP|Công ty Cổ phần)$", 
 _LEGAL_PREFIX_RE = re.compile(r"^(?:CTCP|Công ty Cổ phần|Công ty CP)(?:\s*[-–—])?\s+",
                               re.IGNORECASE)
 _MIN_VARIANT_WORDS = 2
+# Equivalent spellings of the joint-stock legal form added around a stripped core name.
+_LEGAL_PREFIXES = ("CTCP ", "Công ty Cổ phần ", "Công ty CP ")
+_LEGAL_SUFFIXES = (" - CTCP", " - Công ty Cổ phần")
 
 Aliases = Mapping[str, str | Sequence[str]]
 
@@ -38,8 +41,14 @@ def legal_form_variants(name: str) -> set[str]:
     without_suffix = _LEGAL_SUFFIX_RE.sub("", text)
     candidates = {without_suffix, _LEGAL_PREFIX_RE.sub("", text),
                   _LEGAL_PREFIX_RE.sub("", without_suffix)}
-    return {candidate for candidate in candidates if candidate != text
-            and len(fold_text(candidate).split()) >= _MIN_VARIANT_WORDS}
+    cores = {candidate for candidate in candidates if candidate != text
+             and len(fold_text(candidate).split()) >= _MIN_VARIANT_WORDS}
+    spellings = set(cores)
+    for core in cores:
+        spellings.update(prefix + core for prefix in _LEGAL_PREFIXES)
+        spellings.update(core + suffix for suffix in _LEGAL_SUFFIXES)
+    spellings.discard(text)
+    return spellings
 
 
 class EntityRegistry:

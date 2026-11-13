@@ -195,6 +195,20 @@ class EntityRegistryTests(unittest.TestCase):
         self.assertEqual(self.registry.unknown_ticker_candidates("LNST LNTT EBITDA BCTC ZZZ"),
                          {"ZZZ"})
 
+    def test_legal_form_spellings_resolve_to_same_company(self):
+        for text in ("Công ty Cổ phần Tập đoàn Thủy sản Minh Phú", "Công ty CP Tập đoàn Thủy sản "
+                     "Minh Phú", "CTCP Tập đoàn Thủy sản Minh Phú", "Tập đoàn Thủy sản Minh Phú",
+                     "Tập đoàn Thủy sản Minh Phú - Công ty Cổ phần"):
+            with self.subTest(text=text):
+                self.assertEqual(self.registry.resolve(text), {"MPC"})
+        self.assertEqual(self.registry.resolve("Công ty CP Viễn thông FPT"), {"FOX"})
+        self.assertEqual(self.registry.find_mentions("Công ty Cổ phần Viễn thông FPT (FOX)"),
+                         {"FOX"})
+        self.assertEqual(self.registry.resolve("Công ty Cổ phần FPT"), set())
+
+    def test_tnhh_and_mtv_are_not_unknown_tickers(self):
+        self.assertEqual(self.registry.unknown_ticker_candidates("Công ty TNHH MTV ZZZ"), {"ZZZ"})
+
     def test_finance_acronyms_and_period_tokens_are_not_unknown_tickers(self):
         text = ("EBIT ROE ROA ROIC NIM NPL CASA GTGT KQKD BCTC LCTT TNDN VCSH EPS "
                 "FY23 FY2023 Q1 H1 Q123 H224 ZZZ")
@@ -263,8 +277,9 @@ class EntityRegistryTests(unittest.TestCase):
                                    "CCC": "Công ty CP Gamma Delta", "DDD": "Công ty Cổ phần Eta Theta"})
         self.assertEqual(registry.resolve("Alpha Beta"), {"AAA", "BBB"})
         self.assertEqual(registry.find_mentions("Doanh thu Alpha Beta"), {"AAA", "BBB"})
-        self.assertEqual(registry.resolve("CTCP Alpha Beta"), {"AAA"})
-        self.assertEqual(registry.resolve("Alpha Beta - Công ty Cổ phần"), {"BBB"})
+        # Equivalent legal-form spellings share the core name, so they stay ambiguous too.
+        self.assertEqual(registry.resolve("CTCP Alpha Beta"), {"AAA", "BBB"})
+        self.assertEqual(registry.resolve("Alpha Beta - Công ty Cổ phần"), {"AAA", "BBB"})
         self.assertEqual(registry.resolve("Gamma Delta"), {"CCC"})
         self.assertEqual(registry.resolve("Eta Theta"), {"DDD"})
 
