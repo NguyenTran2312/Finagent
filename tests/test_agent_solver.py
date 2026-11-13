@@ -4,6 +4,7 @@ from decimal import Decimal as D
 from src.agent.gather import Gatherer
 from src.agent.metrics import MetricMapping
 from src.agent.solver import (
+    CLAIM_UNITS,
     NeedModel,
     SolutionDraft,
     build_context,
@@ -59,6 +60,12 @@ class ClaimedAnswerTest(unittest.TestCase):
         self.assertEqual(claimed_answer(draft(value="VJC", unit="ticker")), Answer("ticker", "VJC", "ticker"))
         self.assertEqual(claimed_answer(draft(value="true", unit="boolean")), Answer("boolean", True, "boolean"))
         self.assertEqual(claimed_answer(draft(value="False", unit="boolean")), Answer("boolean", False, "boolean"))
+
+    def test_every_listed_claim_unit_parses(self):
+        for unit in CLAIM_UNITS:
+            value = "VJC" if unit == "ticker" else "true" if unit == "boolean" else "3"
+            with self.subTest(unit=unit):
+                self.assertIsNotNone(claimed_answer(draft(value=value, unit=unit)))
 
     def test_claimed_answer_unparseable_is_none(self):
         for value, unit in (("khoảng 2 tỷ", "ty"), ("NaN", "ty"), ("2", "parsecs"), ("2023.5", "year"),
@@ -173,6 +180,22 @@ class SolveTest(unittest.TestCase):
         self.assertEqual((first.outcome, first.problems, first.gathered),
                          ("repair", ("unknown node id: no_such_node",), ()))
         self.assertIn("unknown node id: no_such_node", self.llm.prompts[1])
+
+    def test_unparseable_claim_is_repair(self):
+        self.pregather()
+        result = self.run_solve(draft(unit="tỷ"), draft())
+        self.assertEqual(result.status, "passed")
+        self.assertEqual([a.outcome for a in result.attempts], ["repair", "passed"])
+        (problem,) = result.attempts[0].problems
+        self.assertTrue(problem.startswith("claim does not parse: -1950.25 tỷ"))
+        self.assertIn("claim does not parse", self.llm.prompts[1])
+        self.assertIn("nghin_ty", self.llm.prompts[1])  # the allowed units are listed
+
+    def test_unparseable_claim_never_passes(self):
+        self.pregather()
+        result = self.run_solve(draft(value="~1950"), config=AgentConfig(max_repairs=0))
+        self.assertEqual(result.status, "gates_failed")
+        self.assertIsNone(result.result)
 
     def test_exhausted_gather_rounds_runs_without_gathering(self):
         config = AgentConfig(max_repairs=0, max_gather_rounds=0)

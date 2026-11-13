@@ -62,6 +62,7 @@ _YEAR_UNITS = {"year": "year", "count": "count"}
 _PERCENT_UNITS = ("percent", "percentage_points")
 _PLAIN_UNITS = {"times": Dimension.RATIO, "days": Dimension.DAYS,
                 "money_per_share": Dimension.MONEY_PER_SHARE}
+CLAIM_UNITS = (*MONEY_SCALES, *_PERCENT_UNITS, *_PLAIN_UNITS, *_YEAR_UNITS, "ticker", "boolean")
 
 
 class NeedModel(BaseModel):
@@ -152,9 +153,14 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
         gathered: tuple[LeafLog, ...] = ()
         failed: tuple[LeafLog, ...] = ()
         result: ExecutionResult | None = None
+        claimed = claimed_answer(draft)
+        claim_problems = () if claimed is not None else (
+            f"claim does not parse: {draft.claimed_value} {draft.claimed_unit} "
+            f"(claimed_unit must be one of: {', '.join(CLAIM_UNITS)})",)
         unknown = [n.node_id for n in needs if not _known(tree, n.node_id)]
         if unknown:
-            problems = tuple(f"unknown node id: {node_id}" for node_id in dict.fromkeys(unknown))
+            problems = (*(f"unknown node id: {node_id}" for node_id in dict.fromkeys(unknown)),
+                        *claim_problems)
         else:
             new = [n for n in needs if not gatherer.requested(n)]
             if new and gather_rounds < config.max_gather_rounds:
@@ -164,12 +170,13 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
             if isinstance(outcome, ExecutionFailure):
                 if outcome.detail in _DATA_FAILURES:
                     failed = tuple(log for n in needs for log in gatherer.failures(n))
-                    problems = () if failed else (UNDECLARED_DATA,)
+                    problems = () if failed else (UNDECLARED_DATA, *claim_problems)
                 else:
-                    problems = _failure_problems(outcome)
+                    problems = (*_failure_problems(outcome), *claim_problems)
+            elif claimed is None:  # R8: never gate without a claim; the attempt cannot pass
+                problems = claim_problems
             else:
-                report = run_gates(draft.code, outcome, tree, gatherer.facts, context,
-                                   claimed=claimed_answer(draft))
+                report = run_gates(draft.code, outcome, tree, gatherer.facts, context, claimed=claimed)
                 problems = tuple(f"{i.code}: {i.message}" for i in report.issues if i.severity == "error")
                 result = outcome if report.passed else None
         status = "facts_missing" if failed else "passed" if result is not None else "repair"
