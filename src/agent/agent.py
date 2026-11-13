@@ -24,6 +24,8 @@ from src.query_paraphrase.schemas import QATurn, QueryPlan
 # Folded words of a full-year period; anything else in Subquery.period is a sub-annual period.
 _ANNUAL_WORDS = frozenset({"nam", "ca", "tron", "tai", "chinh", "fy", "full", "fiscal", "year", "annual"})
 _TWELVE_MONTHS = re.compile(r"\b12 thang\b")
+# "cuối năm" (end-of-year balance) is annual; "cuối" alone or before another period is not.
+_END_OF_YEAR = re.compile(r"\bcuoi nam\b")
 _YEAR = re.compile(r"(?:19|20|21)\d{2}")
 
 _TITLES = {
@@ -135,6 +137,9 @@ class ReasoningAgent:
 
     def _plan(self, question: str, qa_history, emit) -> QueryPlan:
         result = self._paraphraser.paraphrase(question, qa_history)
+        if result.status == "invalid":  # one repair round with the validator's problems
+            result = self._paraphraser.paraphrase(
+                question, qa_history, feedback=[issue.message for issue in result.issues])
         messages = [issue.message for issue in result.issues]
         if result.status == "unavailable":
             raise _refuse("llm_unavailable", messages, status="error")
@@ -162,12 +167,14 @@ def _missing_fields(sq) -> list[str]:
 
 
 def _annual(period: str | None) -> bool:
-    """True for no period or a full-year wording ("năm", "cả năm 2023", "FY2023", "12 tháng").
+    """True for no period or a full-year wording ("năm", "cả năm 2023", "FY2023", "12 tháng",
+    "cuối năm" for an end-of-year balance).
 
-    Facts are annual only, so any other period (quý 2, 6 tháng, H1, nửa đầu năm, ...) is refused
-    rather than answered with the full-year value.
+    Facts are annual only, so any other period (quý 2, 6 tháng, H1, nửa đầu năm, cuối quý, ...)
+    is refused rather than answered with the full-year value.
     """
     if period is None:
         return True
-    words = re.findall(r"[a-z]+|\d+", _TWELVE_MONTHS.sub(" ", fold_text(period)))
+    folded = _END_OF_YEAR.sub(" ", _TWELVE_MONTHS.sub(" ", fold_text(period)))
+    words = re.findall(r"[a-z]+|\d+", folded)
     return all(w in _ANNUAL_WORDS or _YEAR.fullmatch(w) for w in words)

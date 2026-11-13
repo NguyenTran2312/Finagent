@@ -202,7 +202,9 @@ The event `metrics` records, per subquery, the id and how it was found: `catalog
 
 1. **plan:** `paraphraser.paraphrase(question, qa_history)`.
    - `needs_clarification` → status `clarify`.
-   - `invalid` → `refused/plan_invalid`.
+   - `invalid` → one repair call `paraphrase(question, qa_history, feedback=[issue messages])`;
+     its result is handled by these same rules, and a second `invalid` → `refused/plan_invalid`.
+     Only the final result emits the plan event.
    - `unavailable` → `error`.
 2. **metrics:** §4.1.
 3. **gather:** §4.2.
@@ -213,7 +215,7 @@ The event `metrics` records, per subquery, the id and how it was found: `catalog
 emits one `StepEvent`, and solve emits one per attempt. `on_event` is called synchronously, so
 the UI can render progressively.
 
-**Per-question cap.** At most 1 paraphrase + 1 mapping + 6 locator + 4 code calls = 12 LLM calls
+**Per-question cap.** At most 2 paraphrase (1 + 1 repair) + 1 mapping + 6 locator + 4 code calls = 13 LLM calls
 (the semantic reviewer is off). The usual cost is 2–3.
 
 ## 6. Web demo (`app/demo.py`)

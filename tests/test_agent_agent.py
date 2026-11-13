@@ -3,6 +3,7 @@ import unittest
 from src.agent.agent import ReasoningAgent, _annual
 from src.agent.llm import CountingLlm, LlmMalformedOutput, LlmUnavailable
 from src.agent.metrics import MetricChoice, MetricChoices
+from src.agent.present import plan_data
 from src.agent.solver import NeedModel, SolutionDraft
 from src.agent.types import AgentConfig
 from src.extraction.extractor import LeafExtractor
@@ -99,15 +100,40 @@ class ReasoningAgentTest(unittest.TestCase):
         self.assertEqual(kinds(run)[:2], ["plan", "metrics"])  # the plan was valid
 
     def test_invalid_plan_refused(self):
+        # An invalid plan gets one repair paraphrase; a second invalid plan is refused.
         scripted_plan = QueryPlan.model_validate(
             plan(Q_LOOKUP, sq(ticker="VJC", year=2022, metric_text="chi phí lãi vay", unit="tỷ đồng")))
-        agent, _, _ = make_agent(scripted_plan)
+        agent, scripted, _ = make_agent(scripted_plan, scripted_plan)
         run = agent.run(Q_LOOKUP)
         self.assertEqual((run.status, run.reason, run.answer), ("refused", "plan_invalid", None))
         self.assertTrue(run.text.startswith("Không phân tích được câu hỏi."), run.text)
         self.assertIn("- year 2022 is not in the question", run.text)
+        self.assertEqual((run.llm_calls, len(scripted.prompts)), (2, 2))
         self.assertEqual(kinds(run), ["answer"])
         self.assertSingleAnswerEvent(run)
+
+    def test_invalid_plan_repaired_once_with_validator_feedback(self):
+        bad_plan = QueryPlan.model_validate(
+            plan(Q_LOOKUP, sq(ticker="VJC", year=2022, metric_text="chi phí lãi vay", unit="tỷ đồng")))
+        agent, scripted, _ = make_agent(bad_plan, LOOKUP_PLAN, draft())
+        run = agent.run(Q_LOOKUP)
+        self.assertEqual(run.status, "answered", run.text)
+        self.assertEqual(run.llm_calls, 3)
+        self.assertNotIn("<<<LOI_LAN_TRUOC>>>", scripted.prompts[0])
+        self.assertIn("<<<LOI_LAN_TRUOC>>>", scripted.prompts[1])
+        self.assertIn("- year 2022 is not in the question", scripted.prompts[1])
+        self.assertEqual(kinds(run), ["plan", "metrics", "gather", "solve", "answer"])
+        self.assertEqual(run.events[0].data, plan_data(LOOKUP_PLAN))
+
+    def test_clarify_and_unavailable_are_not_repaired(self):
+        question = "Doanh thu ZZZ năm 2023?"
+        unknown = QueryPlan.model_validate(plan(question, sq(ticker="VJC", year=2023, metric="revenue")))
+        agent, scripted, _ = make_agent(unknown)
+        run = agent.run(question)
+        self.assertEqual((run.status, run.llm_calls, len(scripted.prompts)), ("clarify", 1, 1))
+        agent, scripted, _ = make_agent(LlmUnavailable("TimeoutError"))
+        run = agent.run(Q_LOOKUP)
+        self.assertEqual((run.status, run.llm_calls, len(scripted.prompts)), ("error", 1, 1))
 
     def test_missing_ticker_refused(self):
         question = "Doanh thu năm 2023 là bao nhiêu?"
@@ -131,11 +157,12 @@ class ReasoningAgentTest(unittest.TestCase):
         self.assertSingleAnswerEvent(run)
 
     def test_annual_periods_supported(self):
-        for period in (None, "năm", "cả năm 2023", "Năm tài chính 2023", "FY2023", "12 tháng", "2023"):
+        for period in (None, "năm", "cả năm 2023", "Năm tài chính 2023", "FY2023", "12 tháng", "2023",
+                       "cuối năm", "Cuối năm 2022", "tại cuối năm"):
             with self.subTest(period=period):
                 self.assertTrue(_annual(period))
         for period in ("quý 2", "Q2/2023", "6 tháng đầu năm", "H1", "nửa đầu năm", "9 tháng", "tháng 12",
-                       "bán niên", "lũy kế"):
+                       "bán niên", "lũy kế", "cuối quý 2", "cuối kỳ", "cuối", "cuối tháng 6 năm 2023"):
             with self.subTest(period=period):
                 self.assertFalse(_annual(period))
 
