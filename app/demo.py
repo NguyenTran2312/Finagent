@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -111,8 +112,12 @@ def main() -> None:
             run: AgentRun = get_agent(config).run(
                 question, list(st.session_state["history"]), on_event=on_event)
         except Exception as exc:  # never show the message: it could carry secrets
+            logging.getLogger(__name__).exception("agent run failed")  # server-side log only
             status.empty()
-            st.error(f"Đã xảy ra lỗi ({type(exc).__name__}). Vui lòng thử lại.")
+            error = f"Đã xảy ra lỗi ({type(exc).__name__}). Vui lòng thử lại."
+            st.error(error)
+            # Keep the question answered after a rerun; it is not added to the agent history.
+            st.session_state["messages"].append({"role": "assistant", "text": error})
             return
         status.empty()
         st.markdown(run.text)

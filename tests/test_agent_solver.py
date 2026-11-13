@@ -2,9 +2,11 @@ import unittest
 from decimal import Decimal as D
 
 from src.agent.gather import Gatherer
+from src.agent.llm import LlmMalformedOutput, LlmUnavailable
 from src.agent.metrics import MetricMapping
 from src.agent.solver import (
     CLAIM_UNITS,
+    MALFORMED_DRAFT,
     NeedModel,
     SolutionDraft,
     build_context,
@@ -16,7 +18,7 @@ from src.calculation import MONEY_SCALES, Answer, Dimension, Quantity, display_u
 from src.extraction.extractor import LeafExtractor
 from src.query_paraphrase.schemas import QueryPlan
 from tests.agent_fixtures import ScriptedLlm
-from tests.test_extraction_extractor import default_store, templates, tree
+from tests.test_extraction_extractor import default_store, doc, is_rows, is_table, store_of, templates, tree
 from tests.test_query_validation import plan, sq
 
 QUESTION = "Chi phí lãi vay của VJC năm 2023 là bao nhiêu tỷ đồng?"
@@ -32,9 +34,18 @@ def draft(code=GOOD_CODE, value="-1950.25", unit="ty", needs=(INTEREST,)):
     return SolutionDraft(code=code, claimed_value=value, claimed_unit=unit, needs=list(needs))
 
 
-def make_gatherer():
-    factory = lambda loc: LeafExtractor(default_store(), tree, templates, fallback=loc)
+def make_gatherer(store=None):
+    store = store if store is not None else default_store()
+    factory = lambda loc: LeafExtractor(store, tree, templates, fallback=loc)
     return Gatherer(tree, templates, factory, None, 6, "consolidated")
+
+
+def gross_profit_store(reported=True):
+    """VJC 2023 income statement without cost of goods sold (code 11); gross profit (20) optional."""
+    rows = is_rows(2023)
+    if reported:
+        rows.append(["20", "Lợi nhuận gộp về bán hàng và cung cấp dịch vụ", "", "1.000", "900"])
+    return store_of((doc("VJC23C", 2023), [is_table("VJC23C", rows)]))
 
 
 class ClaimedAnswerTest(unittest.TestCase):
@@ -196,6 +207,46 @@ class SolveTest(unittest.TestCase):
         result = self.run_solve(draft(value="~1950"), config=AgentConfig(max_repairs=0))
         self.assertEqual(result.status, "gates_failed")
         self.assertIsNone(result.result)
+
+    def test_failed_alternative_of_satisfied_need_is_not_facts_missing(self):
+        # gross_profit = gross_profit_reported | net_revenue - cost_of_goods_sold: the first
+        # alternative is complete, so the NotFound COGS leaf is over-fetch, not a missing fact.
+        self.gatherer = make_gatherer(gross_profit_store())
+        gross = NeedModel(node_id="gross_profit", ticker="VJC", year=2023)
+        result = self.run_solve(draft(needs=[gross]), draft())
+        self.assertEqual(result.status, "passed")
+        first = result.attempts[0]
+        self.assertIn(("cost_of_goods_sold", "NotFound"), [(l.leaf_id, l.outcome) for l in first.gathered])
+        self.assertEqual((first.outcome, first.problems), ("repair", (UNDECLARED,)))
+        self.assertEqual(result.failed, ())
+
+    def test_need_without_complete_alternative_is_facts_missing(self):
+        self.gatherer = make_gatherer(gross_profit_store(reported=False))
+        gross = NeedModel(node_id="gross_profit", ticker="VJC", year=2023)
+        result = self.run_solve(draft(needs=[gross]))
+        self.assertEqual(result.status, "facts_missing")
+        self.assertEqual(sorted(l.leaf_id for l in result.failed),
+                         ["cost_of_goods_sold", "gross_profit_reported"])
+
+    def test_malformed_draft_is_repair(self):
+        self.pregather()
+        result = self.run_solve(LlmMalformedOutput("ValidationError"), draft())
+        self.assertEqual(result.status, "passed")
+        first = result.attempts[0]
+        self.assertEqual((first.number, first.outcome, first.problems, first.code, first.needs),
+                         (1, "repair", (MALFORMED_DRAFT,), "", ()))
+        self.assertEqual(self.seen, list(result.attempts))
+        self.assertIn(MALFORMED_DRAFT, self.llm.prompts[1])
+
+    def test_malformed_drafts_consume_attempts(self):
+        result = self.run_solve(*(LlmMalformedOutput("MalformedOutput") for _ in range(2)),
+                                config=AgentConfig(max_repairs=1))
+        self.assertEqual(result.status, "gates_failed")
+        self.assertEqual([a.problems for a in result.attempts], [(MALFORMED_DRAFT,)] * 2)
+
+    def test_unavailable_llm_still_propagates(self):
+        with self.assertRaises(LlmUnavailable):
+            self.run_solve(LlmUnavailable("TimeoutError"))
 
     def test_exhausted_gather_rounds_runs_without_gathering(self):
         config = AgentConfig(max_repairs=0, max_gather_rounds=0)

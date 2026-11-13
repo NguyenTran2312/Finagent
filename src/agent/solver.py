@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from src.agent.gather import Gatherer
-from src.agent.llm import StructuredLlm
+from src.agent.llm import LlmMalformedOutput, StructuredLlm
 from src.agent.metrics import MetricMapping
 from src.agent.types import AgentConfig, DataNeed, LeafLog, Scope
 from src.calculation import sandbox
@@ -31,6 +31,7 @@ from src.extraction.templates import TickerTemplates
 from src.query_paraphrase.schemas import QueryPlan
 
 UNDECLARED_DATA = "code used data not declared in needs"
+MALFORMED_DRAFT = "output did not match the SolutionDraft schema"
 _DATA_FAILURES = frozenset({"MissingFact", "MetricUnavailable"})
 
 # Calculation core spec §16, "Generated-code constraints".
@@ -148,7 +149,13 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
     for number in range(1, config.max_repairs + 2):
         prompt = _prompt(question, plan, mappings, tree, gatherer.facts, context,
                          attempts[-1] if attempts else None)
-        draft = llm(prompt, SolutionDraft)
+        try:
+            draft = llm(prompt, SolutionDraft)
+        except LlmMalformedOutput:  # a reply that does not parse is repaired like a bad draft
+            attempt = Attempt(number, "", (), (), (MALFORMED_DRAFT,), "repair")
+            attempts.append(attempt)
+            on_attempt(attempt)
+            continue
         needs = tuple(DataNeed(n.node_id, n.ticker, n.year, n.scope, n.helper) for n in draft.needs)
         gathered: tuple[LeafLog, ...] = ()
         failed: tuple[LeafLog, ...] = ()
@@ -169,7 +176,7 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
             outcome = sandbox.run(draft.code, tree, gatherer.facts, context)
             if isinstance(outcome, ExecutionFailure):
                 if outcome.detail in _DATA_FAILURES:
-                    failed = tuple(log for n in needs for log in gatherer.failures(n))
+                    failed = tuple(log for n in needs for log in gatherer.unmet(n))
                     problems = () if failed else (UNDECLARED_DATA, *claim_problems)
                 else:
                     problems = (*_failure_problems(outcome), *claim_problems)

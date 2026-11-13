@@ -2,13 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 StructuredLlm = Callable[[str, type[BaseModel]], BaseModel]
 
 
 class LlmUnavailable(RuntimeError):
     """The LLM could not produce a valid structured reply; message is a class name only."""
+
+
+class LlmMalformedOutput(LlmUnavailable):
+    """The LLM replied, but the reply did not parse into the requested schema (never the content)."""
+
+
+def _is_parse_error(exc: Exception) -> bool:
+    """Pydantic validation or LangChain output-parser failure (checked by name: no langchain import)."""
+    if isinstance(exc, ValidationError):
+        return True
+    return any(cls.__name__ == "OutputParserException" for cls in type(exc).__mro__)
 
 
 class CountingLlm:
@@ -37,11 +48,15 @@ def openai_llm(
 
     def call(prompt: str, schema: type[BaseModel]) -> BaseModel:
         try:
-            result = client.with_structured_output(schema).invoke(prompt)
+            # Function calling without strict mode: the default json_schema method sends a strict
+            # schema, which OpenAI rejects for dict-typed fields (QueryPlan, MetricChoices).
+            runnable = client.with_structured_output(schema, method="function_calling")
+            result = runnable.invoke(prompt)
         except Exception as exc:
-            raise LlmUnavailable(type(exc).__name__) from None
+            error = LlmMalformedOutput if _is_parse_error(exc) else LlmUnavailable
+            raise error(type(exc).__name__) from None
         if not isinstance(result, schema):
-            raise LlmUnavailable("MalformedOutput")
+            raise LlmMalformedOutput("MalformedOutput")
         return result
 
     return call

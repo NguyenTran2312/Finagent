@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 
@@ -17,7 +18,13 @@ from src.calculation.metric_tree import MetricTree
 from src.extraction.extractor import CellLocator, LeafExtractor
 from src.extraction.llm_fallback import LlmCellLocator, PointerAnswer
 from src.extraction.templates import TickerTemplates
+from src.preprocess.cleaner import fold_text
 from src.query_paraphrase.schemas import QATurn, QueryPlan
+
+# Folded words of a full-year period; anything else in Subquery.period is a sub-annual period.
+_ANNUAL_WORDS = frozenset({"nam", "ca", "tron", "tai", "chinh", "fy", "full", "fiscal", "year", "annual"})
+_TWELVE_MONTHS = re.compile(r"\b12 thang\b")
+_YEAR = re.compile(r"(?:19|20|21)\d{2}")
 
 _TITLES = {
     "plan": "Phân tích câu hỏi",
@@ -149,4 +156,18 @@ def _missing_fields(sq) -> list[str]:
         lines.append(f"{sq.id}: thiếu mã cổ phiếu ({sq.question})")
     if sq.year is None:
         lines.append(f"{sq.id}: thiếu năm ({sq.question})")
+    if not _annual(sq.period):
+        lines.append(f"{sq.id}: kỳ {sq.period} không được hỗ trợ (chỉ có số liệu năm)")
     return lines
+
+
+def _annual(period: str | None) -> bool:
+    """True for no period or a full-year wording ("năm", "cả năm 2023", "FY2023", "12 tháng").
+
+    Facts are annual only, so any other period (quý 2, 6 tháng, H1, nửa đầu năm, ...) is refused
+    rather than answered with the full-year value.
+    """
+    if period is None:
+        return True
+    words = re.findall(r"[a-z]+|\d+", _TWELVE_MONTHS.sub(" ", fold_text(period)))
+    return all(w in _ANNUAL_WORDS or _YEAR.fullmatch(w) for w in words)

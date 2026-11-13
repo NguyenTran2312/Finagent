@@ -20,6 +20,8 @@ from src.query_paraphrase.schemas import QueryPlan
 
 # Opened retrievers are shared by every agent: a new AgentConfig (slider, toggle) must not reload
 # BGE-M3. Keyed by the arguments that identify the index; guarded so sessions open it once.
+# The instance is shared across Streamlit sessions and its internal LRU cache is not thread-safe:
+# acceptable for this single-user demo only.
 _RETRIEVERS: dict[tuple, object] = {}
 _RETRIEVERS_LOCK = threading.Lock()
 

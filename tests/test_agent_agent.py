@@ -1,7 +1,7 @@
 import unittest
 
-from src.agent.agent import ReasoningAgent
-from src.agent.llm import CountingLlm, LlmUnavailable
+from src.agent.agent import ReasoningAgent, _annual
+from src.agent.llm import CountingLlm, LlmMalformedOutput, LlmUnavailable
 from src.agent.metrics import MetricChoice, MetricChoices
 from src.agent.solver import NeedModel, SolutionDraft
 from src.agent.types import AgentConfig
@@ -117,6 +117,41 @@ class ReasoningAgentTest(unittest.TestCase):
         self.assertIn("- q1", run.text)
         self.assertIn("mã cổ phiếu", run.text)
         self.assertEqual((run.llm_calls, kinds(run)), (1, ["plan", "answer"]))
+        self.assertSingleAnswerEvent(run)
+
+    def test_sub_annual_period_refused(self):
+        question = "Doanh thu quý 2 năm 2023 của VJC là bao nhiêu?"
+        scripted_plan = QueryPlan.model_validate(
+            plan(question, sq(ticker="VJC", year=2023, metric="revenue", period="quý 2")))
+        agent, _, _ = make_agent(scripted_plan)
+        run = agent.run(question)
+        self.assertEqual((run.status, run.reason, run.answer), ("refused", "plan_invalid", None))
+        self.assertIn("- q1: kỳ quý 2 không được hỗ trợ (chỉ có số liệu năm)", run.text)
+        self.assertEqual((run.llm_calls, kinds(run)), (1, ["plan", "answer"]))
+        self.assertSingleAnswerEvent(run)
+
+    def test_annual_periods_supported(self):
+        for period in (None, "năm", "cả năm 2023", "Năm tài chính 2023", "FY2023", "12 tháng", "2023"):
+            with self.subTest(period=period):
+                self.assertTrue(_annual(period))
+        for period in ("quý 2", "Q2/2023", "6 tháng đầu năm", "H1", "nửa đầu năm", "9 tháng", "tháng 12",
+                       "bán niên", "lũy kế"):
+            with self.subTest(period=period):
+                self.assertFalse(_annual(period))
+
+    def test_malformed_draft_is_repaired(self):
+        agent, _, _ = make_agent(LOOKUP_PLAN, LlmMalformedOutput("ValidationError"), draft())
+        run = agent.run(Q_LOOKUP)
+        self.assertEqual(run.status, "answered", run.text)
+        self.assertEqual(kinds(run), ["plan", "metrics", "gather", "solve", "solve", "answer"])
+        self.assertEqual((run.events[3].data["outcome"], run.events[3].data["problems"]),
+                         ("repair", ["output did not match the SolutionDraft schema"]))
+        self.assertEqual(run.llm_calls, 3)
+
+    def test_malformed_output_outside_solve_is_error(self):
+        agent, _, _ = make_agent(LlmMalformedOutput("ValidationError"))
+        run = agent.run(Q_LOOKUP)
+        self.assertEqual((run.status, run.reason), ("error", "llm_unavailable"))
         self.assertSingleAnswerEvent(run)
 
     def test_unmapped_metric_refused(self):

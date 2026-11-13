@@ -68,6 +68,18 @@ class Gatherer:
         logs = (self._by_key.get(k) for k in self._need_keys(need))
         return tuple(l for l in logs if l is not None and l.outcome != "Found")
 
+    def unmet(self, need: DataNeed) -> tuple[LeafLog, ...]:
+        """The need's failure logs, or () when every year it covers has a fully Found alternative.
+
+        Over-fetched alternatives that failed are harmless once another alternative is complete.
+        """
+        ticker, scope = _ticker(need), need.scope or self._default_scope
+        found = {k for k, log in self._by_key.items() if log.outcome == "Found"}
+        if all(any({(r.metric_id, ticker, r.year, scope) for r in alt} <= found for alt in alts)
+               for alts in self._alternatives(need)):
+            return ()
+        return self.failures(need)
+
     def gather(self, needs: Iterable[DataNeed]) -> tuple[LeafLog, ...]:
         groups: dict[tuple[str, str], list[LeafRequest]] = {}
         for need in needs:
@@ -87,16 +99,27 @@ class Gatherer:
     def _template(self, need: DataNeed):
         return self._templates.get(_ticker(need))
 
+    def _years(self, need: DataNeed) -> tuple[int, ...]:
+        return (need.year, need.year - 1) if need.helper == "avg_balance" else (need.year,)
+
+    def _resolvable(self, need: DataNeed) -> bool:
+        template = self._template(need)
+        return template in _CALCULATION_TEMPLATES and self._tree.applies(need.node_id, template)
+
+    def _alternatives(self, need: DataNeed) -> list[list[frozenset[LeafRequest]]]:
+        """Per year the need covers, its leaf-set alternatives (one minimal request when unresolvable)."""
+        if self._resolvable(need):
+            template = self._template(need)
+            return [self._tree.required_leaves(need.node_id, template, y) for y in self._years(need)]
+        return [[frozenset({LeafRequest(need.node_id, y, "flow")})] for y in self._years(need)]
+
     def _requests(self, need: DataNeed) -> list[LeafRequest]:
         """Leaf requests of one need; a minimal request when the extractor must report the failure."""
-        years = (need.year, need.year - 1) if need.helper == "avg_balance" else (need.year,)
-        template = self._template(need)
-        if template in _CALCULATION_TEMPLATES and self._tree.applies(need.node_id, template):
-            leaves = {r for year in years for alt in self._tree.required_leaves(need.node_id, template, year)
-                      for r in alt}
+        if self._resolvable(need):
+            leaves = {r for alts in self._alternatives(need) for alt in alts for r in alt}
             return sorted(leaves, key=lambda r: (r.year, r.metric_id, r.period_kind))
         # UnknownTicker / UnsupportedTemplate / NotApplicable come from the extractor itself.
-        return [LeafRequest(need.node_id, year, "flow") for year in years]
+        return [LeafRequest(need.node_id, y, "flow") for y in self._years(need)]
 
     def _need_keys(self, need: DataNeed) -> list[_Key]:
         ticker, scope = _ticker(need), need.scope or self._default_scope
