@@ -54,7 +54,12 @@ def _node_listing(tree: MetricTree, template: Template) -> list[str]:
 def _prompt(tree: MetricTree, pending: list[tuple]) -> str:
     out = ["Map each subquery to one metric node id, or propose a new derived metric, or null.",
            "Reply as choices: subquery_id plus node_id (an id listed for its template) "
-           "or proposal (id, label_vi, aliases, templates, dimension, formulas)."]
+           "or proposal (id, label_vi, aliases, templates, dimension, formulas).",
+           "Quy tắc khớp chính xác: chỉ chọn một node khi nó là đúng cùng một khoản mục/chỉ tiêu "
+           "với nội dung truy vấn con. Nếu nội dung là thành phần, dòng con, phần chi tiết hoặc "
+           "thuyết minh của một node (hoặc rộng hơn mọi node), trả null cho cả node_id và "
+           "proposal, không chọn node cha. Ví dụ: \"Lãi tiền gửi\" chỉ là một khoản trong "
+           "doanh thu hoạt động tài chính, không phải toàn bộ financial_income, nên trả null."]
     for template in ("corporate", "bank"):
         if any(t == template for _, t in pending):
             out.append(f"\nNodes for template {template} (node_id — label_vi):")

@@ -56,6 +56,15 @@ class MetricMappingTests(unittest.TestCase):
         self.assertEqual(len(llm.prompts), 1)
         self.assertIn("gross_margin", llm.prompts[0])
 
+    def test_prompt_requires_exact_line_item_match(self):
+        llm = ScriptedLlm(MetricChoices(choices=[MetricChoice(subquery_id="q1")]))
+        p = make_plan(sq("q1", ticker="VJC", year=2023, metric_text="Lãi tiền gửi"))
+        mappings, _ = self.run_map(p, llm)
+        self.assertEqual(mappings, (MetricMapping("q1", None, "unmapped"),))
+        self.assertIn("đúng cùng một khoản mục", llm.prompts[0])
+        self.assertIn("Lãi tiền gửi", llm.prompts[0])
+        self.assertIn("trả null", llm.prompts[0])
+
     def test_llm_node_must_apply_to_template(self):
         llm = ScriptedLlm(MetricChoices(choices=[MetricChoice(subquery_id="q1", node_id="loan_to_deposit")]))
         mappings, _ = self.run_map(make_plan(sq(ticker="VJC", year=2023, metric_text="zzz")), llm)
