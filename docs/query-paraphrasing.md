@@ -61,10 +61,15 @@ prepared pairs.
 
 ### Supported entity and follow-up forms
 
-- Entities: a ticker (`VJC`), the full company name exactly as in `data/code_stock.csv`, or
-  aliases injected through `EntityRegistry.from_csv(path, aliases={...})`. Matching is
-  accent/case-folded and exact; there is no fuzzy matching. Unknown or ambiguous entities
-  give `needs_clarification`.
+- Entities: a ticker (`VJC`), the full company name exactly as in `data/code_stock.csv`, that
+  name without its legal-form wording (a trailing "- CTCP"/"- Công ty Cổ phần" or a leading
+  "CTCP"/"Công ty Cổ phần"/"Công ty CP"; at least two words must remain, business words such as
+  "Tổng Công ty" are kept), or aliases injected through
+  `EntityRegistry.from_csv(path, aliases={...})`. Matching is accent/case-folded and exact;
+  there is no fuzzy matching. Unknown or ambiguous entities give `needs_clarification`.
+- A subquery with `ticker` null and a `company_name` resolving to exactly one ticker gets that
+  ticker before validation (never guessed when it resolves to none or several); the filled
+  ticker is then checked against the question like any other.
 - Follow-ups: a leading "con ...", "... thi sao", "cong ty/doanh nghiep/chi tieu do|nay",
   "nam do". A metric is inherited only after "chi tieu do/nay" (or a bare follow-up that names
   nothing else). Inherited fields must be backed by `context_refs` pointing at history
@@ -115,7 +120,11 @@ Invalid values raise `ValueError` rather than being corrected.
 - `unavailable`: LLM or reviewer raised one of the configured provider errors
   (default `TimeoutError`, `ConnectionError`); only the exception class name is kept.
 
-There is no retry, repair or fallback. Bad input (`ValueError`) raises before any LLM call.
+`paraphrase` makes one LLM call and never retries by itself. A caller may run one repair round
+with `paraphrase(question, qa_history, feedback=[...])`, which adds the previous attempt's
+validator messages to the prompt as a delimited block (the reasoning agent does this once for an
+`invalid` result; the retrieval pipeline does not). There is no fallback. Bad input
+(`ValueError`) raises before any LLM call.
 Any non-valid result gives `retrieval_status="not_run"` and zero retriever calls.
 
 `PipelineResult(paraphrase, evidence_groups, retrieval_status)`; relationships remain on

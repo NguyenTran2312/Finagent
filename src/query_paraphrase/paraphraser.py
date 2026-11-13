@@ -1,10 +1,12 @@
 """Injectable query paraphrasing service: one LLM call, then deterministic validation.
 
-Only a ``valid`` ParaphraseResult may reach retrieval. There is no retry, repair or
-fallback: provider failures (an explicit exception tuple) become ``unavailable`` with a
-sanitized message; every other exception from the LLM or reviewer propagates unchanged.
+Only a ``valid`` ParaphraseResult may reach retrieval. Each ``paraphrase`` call makes exactly
+one LLM call and never retries by itself; a caller may run one repair round by calling again
+with ``feedback`` (the previous attempt's validator messages). There is no fallback: provider
+failures (an explicit exception tuple) become ``unavailable`` with a sanitized message; every
+other exception from the LLM or reviewer propagates unchanged.
 """
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from pydantic import BaseModel, ValidationError
 
@@ -66,10 +68,16 @@ class QueryParaphraser:
         self._registry = (registry if registry is not None else
                           EntityRegistry.from_csv(PROJECT_ROOT / "data" / "code_stock.csv"))
 
-    def paraphrase(self, question: str, qa_history=None) -> ParaphraseResult:
+    def paraphrase(self, question: str, qa_history=None, *,
+                   feedback: Sequence[str] | None = None) -> ParaphraseResult:
+        """Plan ``question``; ``feedback`` lists a previous attempt's problems to repair."""
         _check_text(question, "question", self._settings.max_input_chars)
         history = prepare_history(qa_history, self._settings)  # raises before any LLM call
-        prompt = build_paraphrase_prompt(question, history, settings=self._settings)
+        if feedback is not None and (not isinstance(feedback, (list, tuple)) or not all(
+                isinstance(problem, str) for problem in feedback)):
+            raise ValueError("feedback must be a list or tuple of strings")
+        prompt = build_paraphrase_prompt(question, history, settings=self._settings,
+                                         feedback=feedback)
         try:
             raw = self._llm(prompt)
         except self._provider_errors as error:

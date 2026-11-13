@@ -101,6 +101,26 @@ class PromptTests(unittest.TestCase):
         self.assertIn("(không có)", prompt)
         self.assertIn(Q_VJC, prompt)
 
+    def test_guidance_for_scope_units_tickers_and_years(self):
+        for text in ('scope="separate"', "công ty mẹ X", "bao nhiêu phần trăm", "bao nhiêu lần",
+                     "operation_description", "luôn điền `ticker`", "mỗi năm"):
+            self.assertIn(text, self.prompt)
+
+    def test_feedback_block_only_when_feedback_given(self):
+        for feedback in (None, [], ()):
+            with self.subTest(feedback=feedback):
+                prompt = build_paraphrase_prompt(Q_VJC, [], settings=SETTINGS, feedback=feedback)
+                self.assertNotIn("<<<LOI_LAN_TRUOC>>>", prompt)
+                self.assertEqual(prompt, build_paraphrase_prompt(Q_VJC, [], settings=SETTINGS))
+        problems = ["scope stated in the question is null", "company_name does not resolve"]
+        prompt = build_paraphrase_prompt(Q_VJC, [], settings=SETTINGS, feedback=problems)
+        start, end = prompt.index("<<<LOI_LAN_TRUOC>>>"), prompt.index("<<<HET_LOI_LAN_TRUOC>>>")
+        block = prompt[start:end]
+        for problem in problems:
+            self.assertIn(f"- {problem}", block)
+        self.assertIn("sửa", prompt[:start])
+        self.assertLess(end, prompt.index("<<<CAU_HOI_HIEN_TAI>>>"))
+
 
 class ServiceTests(unittest.TestCase):
     def test_simple_lookup_and_comparison_are_valid(self):
@@ -150,6 +170,24 @@ class ServiceTests(unittest.TestCase):
             with self.subTest(question=question, history=history):
                 with self.assertRaises(ValueError):
                     service.paraphrase(question, history)
+        self.assertEqual(llm.prompts, [])
+
+    def test_feedback_reaches_the_prompt_of_a_single_call(self):
+        llm = FakeLLM(SIMPLE)
+        service = paraphraser(llm)
+        self.assertEqual(service.paraphrase(Q_VJC).status, "valid")
+        result = service.paraphrase(Q_VJC, None, feedback=["year 2022 is not in the question"])
+        self.assertEqual(result.status, "valid")
+        self.assertEqual(len(llm.prompts), 2)
+        self.assertNotIn("<<<LOI_LAN_TRUOC>>>", llm.prompts[0])
+        self.assertIn("<<<LOI_LAN_TRUOC>>>", llm.prompts[1])
+        self.assertIn("- year 2022 is not in the question", llm.prompts[1])
+
+    def test_malformed_feedback_raises_before_llm_call(self):
+        llm = FakeLLM(SIMPLE)
+        for feedback in ("one string", [1], ["ok", None]):
+            with self.subTest(feedback=feedback), self.assertRaises(ValueError):
+                paraphraser(llm).paraphrase(Q_VJC, feedback=feedback)
         self.assertEqual(llm.prompts, [])
 
     def test_history_not_mutated_and_dict_equals_model(self):

@@ -404,6 +404,45 @@ class EntityTests(ValidationTestCase):
         self.assertValid(run(plan(fox, sq(ticker="FOX", **fields)), fox))
         self.assertInvalid(run(plan(fox, sq(ticker="FPT", **fields)), fox), "invented_ticker")
 
+    def test_null_ticker_is_filled_from_a_uniquely_resolving_company_name(self):
+        question = "Doanh thu của Tổng Công ty Cảng Hàng không Việt Nam năm 2022 là bao nhiêu?"
+        payload = plan(question, sq(company_name="Tổng Công ty Cảng Hàng không Việt Nam",
+                                    year=2022, metric="revenue"))
+        result = run(payload, question)
+        self.assertValid(result)
+        self.assertEqual(result.plan.subqueries[0].ticker, "ACV")
+        self.assertEqual(result.plan.subqueries[0].company_name,
+                         "Tổng Công ty Cảng Hàng không Việt Nam")
+
+    def test_filled_tickers_keep_two_companies_distinct(self):
+        question = ("Chênh lệch doanh thu năm 2020 của công ty mẹ CTCP Vincom Retail và công ty mẹ "
+                    "Tổng Công ty Phát triển Đô thị Kinh Bắc là bao nhiêu triệu đồng?")
+        fields = dict(year=2020, metric="revenue", scope="separate", unit="triệu đồng")
+        payload = plan(question, sq("q1", company_name="CTCP Vincom Retail", **fields),
+                       sq("q2", company_name="Tổng Công ty Phát triển Đô thị Kinh Bắc", **fields),
+                       operation="calculate",
+                       relationships=[{"kind": "calculate", "subquery_ids": ["q1", "q2"],
+                                       "description": None}])
+        result = run(payload, question)
+        self.assertValid(result)
+        self.assertEqual([s.ticker for s in result.plan.subqueries], ["VRE", "KBC"])
+
+    def test_filled_ticker_is_still_checked_against_the_question(self):
+        question = "Doanh thu VJC năm 2023 là bao nhiêu?"
+        payload = plan(question, sq(company_name="Tổng Công ty Cảng Hàng không Việt Nam",
+                                    year=2023, metric="revenue"))
+        self.assertInvalid(run(payload, question), "invented_ticker", "missing_ticker")
+
+    def test_ticker_is_not_guessed_from_an_ambiguous_or_unknown_company_name(self):
+        registry = EntityRegistry({"VJC": "CTCP Hàng không Vietjet", "AAA": "CTCP Alpha Beta",
+                                   "BBB": "Alpha Beta - CTCP"})
+        question = "Doanh thu VJC năm 2023 là bao nhiêu?"
+        for name in ("Alpha Beta", "Hàng không Việt"):
+            with self.subTest(name=name):
+                payload = plan(question, sq(company_name=name, year=2023, metric="revenue"))
+                self.assertInvalid(run(payload, question, registry=registry),
+                                   "company_name_mismatch", "missing_ticker")
+
     def test_no_fuzzy_alias_without_injection(self):
         question = "Doanh thu Vietjet năm 2023"
         payload = plan(question, sq(ticker="VJC", company_name="Vietjet", year=2023,

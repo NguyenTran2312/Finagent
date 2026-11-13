@@ -233,6 +233,41 @@ class EntityRegistryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     EntityRegistry.from_csv(path)
 
+    def test_legal_form_wording_is_optional_in_company_names(self):
+        for name, ticker in (("Tổng Công ty Cảng Hàng không Việt Nam", "ACV"),
+                             ("Tổng Công ty Phát triển Đô thị Kinh Bắc", "KBC"),
+                             ("Vincom Retail", "VRE"), ("Hàng không Vietjet", "VJC"),
+                             ("Tổng Công ty Lọc hóa dầu Việt Nam", "BSR"),
+                             ("Tập đoàn VINGROUP", "VIC")):
+            with self.subTest(name=name):
+                self.assertEqual(self.registry.resolve(name), {ticker})
+        question = ("Chênh lệch chi phí năm 2020 của công ty mẹ CTCP Vincom Retail và công ty mẹ "
+                    "Tổng Công ty Phát triển Đô thị Kinh Bắc")
+        self.assertEqual(self.registry.find_mentions(question), {"VRE", "KBC"})
+        # Full names still resolve, and the longest name still wins.
+        self.assertEqual(self.registry.resolve("Tổng Công ty Cảng Hàng không Việt Nam - CTCP"),
+                         {"ACV"})
+        self.assertEqual(self.registry.find_mentions("Doanh thu Tổng Công ty Cảng Hàng không "
+                                                     "Việt Nam - CTCP năm 2023"), {"ACV"})
+
+    def test_business_words_are_kept_and_one_word_variants_are_not_registered(self):
+        for name in ("Cảng Hàng không Việt Nam", "Phát triển Đô thị Kinh Bắc", "Vincom",
+                     "Tasco", "Lọc hóa dầu Việt Nam"):
+            with self.subTest(name=name):
+                self.assertEqual(self.registry.resolve(name), set())
+        self.assertEqual(self.registry.resolve("FPT"), {"FPT"})
+        self.assertEqual(self.registry.find_mentions("Doanh thu Tasco năm 2023"), set())
+
+    def test_legal_form_variant_shared_by_several_tickers_stays_ambiguous(self):
+        registry = EntityRegistry({"AAA": "CTCP Alpha Beta", "BBB": "Alpha Beta - Công ty Cổ phần",
+                                   "CCC": "Công ty CP Gamma Delta", "DDD": "Công ty Cổ phần Eta Theta"})
+        self.assertEqual(registry.resolve("Alpha Beta"), {"AAA", "BBB"})
+        self.assertEqual(registry.find_mentions("Doanh thu Alpha Beta"), {"AAA", "BBB"})
+        self.assertEqual(registry.resolve("CTCP Alpha Beta"), {"AAA"})
+        self.assertEqual(registry.resolve("Alpha Beta - Công ty Cổ phần"), {"BBB"})
+        self.assertEqual(registry.resolve("Gamma Delta"), {"CCC"})
+        self.assertEqual(registry.resolve("Eta Theta"), {"DDD"})
+
     def test_full_company_name_does_not_imply_embedded_fpt_ticker(self):
         self.assertEqual(self.registry.find_mentions("LNST CTCP Viễn thông FPT năm 2023"),
                          {"FOX"})

@@ -7,6 +7,10 @@ pairs when the question layout makes them verifiable, and history provenance (a 
 may not leave null a ticker/year that a retained history question states). It is not proof of
 semantic correctness, so semantic_status stays "not_run". The phrase lists are small on
 purpose; wording outside them is not recognized and is left to the optional reviewer.
+
+One deterministic normalisation runs before the checks: a null ticker is filled from a
+company_name that resolves to exactly one registry ticker (never guessed otherwise). The
+filled ticker is then checked like any other, and a valid plan carries it.
 """
 import re
 import unicodedata
@@ -177,6 +181,18 @@ def _parse(raw):
         malformed = any(e["type"] == "json_invalid" for e in error.errors())
         return None, [_issue(INVALID, "malformed_json" if malformed else "schema_invalid",
                              _summary(error))]
+
+
+def _fill_tickers(plan: QueryPlan, registry: EntityRegistry) -> QueryPlan:
+    """Set a null ticker from a company_name resolving to exactly one ticker; never guess."""
+    subqueries = []
+    for sq in plan.subqueries:
+        if sq.ticker is None and sq.company_name is not None:
+            tickers = registry.resolve(sq.company_name)
+            if len(tickers) == 1:
+                sq = sq.model_copy(update={"ticker": next(iter(tickers))})
+        subqueries.append(sq)
+    return plan.model_copy(update={"subqueries": subqueries})
 
 
 def _mask_weak_tickers(text: str, registry: EntityRegistry) -> str:
@@ -501,6 +517,7 @@ def validate_plan(raw, question: str, qa_history: list[QATurn] | None = None, *,
     plan, issues = _parse(raw)
     if plan is None:
         return _result(issues)
+    plan = _fill_tickers(plan, registry)
     if issues := _structure_issues(plan, question, settings):
         return _result(issues)
     facts = _facts(question, registry)

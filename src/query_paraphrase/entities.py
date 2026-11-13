@@ -1,6 +1,7 @@
 """Company registry built from the local ticker CSV."""
 import csv
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -17,7 +18,28 @@ FINANCE_ACRONYMS = frozenset({
     "EBIT", "ROIC", "NIM", "NPL", "CASA", "GTGT", "KQKD", "LCTT", "VCSH",
 })
 
+# Legal-form wording that a question may omit: a trailing "- CTCP" / "- Công ty Cổ phần" and a
+# leading "CTCP" / "Công ty Cổ phần" / "Công ty CP" (optionally followed by a dash). Business
+# words such as "Tổng Công ty", "Tập đoàn" or "Ngân hàng" are never stripped.
+_LEGAL_SUFFIX_RE = re.compile(r"\s*[-–—]\s*(?:CTCP|Công ty Cổ phần)$", re.IGNORECASE)
+_LEGAL_PREFIX_RE = re.compile(r"^(?:CTCP|Công ty Cổ phần|Công ty CP)(?:\s*[-–—])?\s+",
+                              re.IGNORECASE)
+_MIN_VARIANT_WORDS = 2
+
 Aliases = Mapping[str, str | Sequence[str]]
+
+
+def legal_form_variants(name: str) -> set[str]:
+    """Shorter spellings of a company name without its legal-form wording.
+
+    A variant must keep at least two words, so "CTCP FPT" never registers a bare "FPT".
+    """
+    text = unicodedata.normalize("NFC", clean_text(name))
+    without_suffix = _LEGAL_SUFFIX_RE.sub("", text)
+    candidates = {without_suffix, _LEGAL_PREFIX_RE.sub("", text),
+                  _LEGAL_PREFIX_RE.sub("", without_suffix)}
+    return {candidate for candidate in candidates if candidate != text
+            and len(fold_text(candidate).split()) >= _MIN_VARIANT_WORDS}
 
 
 class EntityRegistry:
@@ -27,6 +49,9 @@ class EntityRegistry:
         for ticker, name in self._names.items():
             self._add(ticker, ticker)
             self._add(name, ticker)
+            # A variant shared by several companies stays ambiguous through the key set.
+            for variant in legal_form_variants(name):
+                self._add(variant, ticker)
         for alias, targets in (aliases or {}).items():
             if isinstance(targets, str):
                 targets = [targets]
