@@ -13,7 +13,8 @@ The gold ``calculation_program`` field is never read.
 
 --llm MODULE builds the LLM cell locator from MODULE.build_client() (real calls cost money; off by
 default). --retriever (default none) ranks the tables of each source with the BM25 / hybrid index
-before reading; the report then adds Found counts via retrieved / full_scan and the rank histogram.
+before reading; the report then adds Found counts via retrieved / full_scan and the rank histogram
+(``unranked``: retrieved from a statement table that only the spec §6.1 rule added).
 The CSV appends chunk_id, retrieval_step and retrieval_rank (empty unless Found with a trace).
 The database is opened read-only by the store and is never written.
 """
@@ -54,7 +55,14 @@ SCALE = {"VND": Decimal(1), "million VND": Decimal(10) ** 6, "million_VND": Deci
          "thousand VND": Decimal(1000)}
 
 
-def rank_bin(rank: int) -> str:
+RANK_BINS = ("1", "2-5", "6-10", ">10", "unranked")
+
+
+def rank_bin(step: str, rank: str) -> str | None:
+    """Histogram bucket of one result's CSV step and rank; ``unranked`` is ``retrieved`` without a rank (§6.1)."""
+    if not rank:
+        return "unranked" if step == "retrieved" else None
+    rank = int(rank)
     return "1" if rank == 1 else "2-5" if rank <= 5 else "6-10" if rank <= 10 else ">10"
 
 
@@ -186,9 +194,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.retriever != "none":
         steps = collections.Counter(r[7] for r in results if r[7])
-        bins = collections.Counter(rank_bin(int(r[8])) for r in results if r[8])
+        bins = collections.Counter(b for r in results if (b := rank_bin(r[7], r[8])))
         print(f"\nRetrieval steps: retrieved {steps['retrieved']}, full_scan {steps['full_scan']}")
-        print("Retrieval rank: " + ", ".join(f"{b} {bins[b]}" for b in ("1", "2-5", "6-10", ">10")))
+        print("Retrieval rank: " + ", ".join(f"{b} {bins[b]}" for b in RANK_BINS))
     return 0
 
 

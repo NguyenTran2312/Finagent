@@ -4,8 +4,9 @@ Per request: the primary report (year y, current column) and, when it gives ``Re
 ``NotFound``, the next report (year y+1, comparative column). Each document of a source is read
 on its own (§5.5); ``_combine_variants`` and ``_combine_sources`` are pure functions over those
 per-document outcomes (§5.4, §5.3). With a ``TableRetriever`` injected, each document is read on
-the source's ranked tables first and in full only when they hold no row (``_read_document``); a
-failed retrieval reads the source in full, and the locator sees the ranked tables when there are any.
+the source's ranked tables (plus, for a statement leaf, the tables tagged with its kind, retrieval
+§6.1) first and in full only when they hold no row (``_read_document``); a failed retrieval reads the
+source in full, and the locator sees those tables when there are any.
 
 ``NotFound`` reasons set here: ``no_row`` (no matching row in any candidate table),
 ``section_unresolved`` (the same for a section or child leaf, §6.4) and ``no_period_column``
@@ -260,14 +261,17 @@ class LeafExtractor:
     def _locate(self, job: _Job, docs: tuple[_Doc, ...], role: SourceRole, deterministic: NotFound) -> Outcome:
         """§5.6: one locator call per document of the source the deterministic search used.
 
-        Retrieval §4.3: the locator sees the document's ranked tables when it has any, else all of them.
+        Retrieval §4.3: the locator sees the document's ``views_R`` (ranked tables plus, for a statement
+        leaf, the tables tagged with its kind, §6.1) when non-empty, else all of them. A located cell is
+        ``retrieved`` (rank ``None`` for a table only §6.1 added) when its table is in ``views_R``.
         """
         year = job.request.year if role == "primary" else job.request.year + 1
         ranking = job.call.ranking(year, job.scope, job.leaf, docs)  # cache hit: ``_source`` asked already
         mode = job.call.retriever.mode if ranking is not None else None
         per_doc: list[tuple[ReportDoc, Outcome]] = []
         for d in docs:
-            result = self._fallback.locate(job.leaf, job.request, role, _ranked_views(d, ranking) or d.views)
+            views_r = _ranked_views(d, ranking, job.leaf)
+            result = self._fallback.locate(job.leaf, job.request, role, views_r or d.views)
             if result.read is None:
                 per_doc.append((d.doc, replace(
                     deterministic,
@@ -282,8 +286,11 @@ class LeafExtractor:
             warnings = result.warnings + d.warnings + _role_warnings(d.doc, role)
             found = _found(job, result.read, "llm_located", warnings, restated)
             if ranking is not None:
-                rank = (ranking.ranks or {}).get(result.read.location.chunk_id)
-                found = _traced(found, mode, "full_scan" if rank is None else "retrieved", rank)
+                chunk_id = result.read.location.chunk_id
+                if any(v.record.chunk_id == chunk_id for v in views_r):
+                    found = _traced(found, mode, "retrieved", ranking.ranks.get(chunk_id))
+                else:
+                    found = _traced(found, mode, "full_scan", None)
             per_doc.append((d.doc, found))
         if not any(isinstance(o, Found) for _, o in per_doc):
             located = [o for _, o in sorted(per_doc, key=lambda p: p[0].doc_id)]
@@ -301,20 +308,29 @@ def _read_document(job: _Job, d: _Doc, role: SourceRole, ranking: _Ranking | Non
     """Retrieval §4.2: step R on the document's ranked tables, step F on all of them when R finds no row."""
     if ranking is None:
         return _in_document(job, d, role, d.views)
-    views_r = _ranked_views(d, ranking)
+    views_r = _ranked_views(d, ranking, job.leaf)
     if views_r:
         outcome = _in_document(job, d, role, views_r)
         if not isinstance(outcome, NotFound):
-            rank = ranking.ranks[outcome.extracted.fact.source.chunk_id] if isinstance(outcome, Found) else None
+            # None when only the §6.1 rule added the source table
+            rank = ranking.ranks.get(outcome.extracted.fact.source.chunk_id) if isinstance(outcome, Found) else None
             return _traced(outcome, mode, "retrieved", rank)
     return _traced(_in_document(job, d, role, d.views), mode, "full_scan", None)
 
 
-def _ranked_views(d: _Doc, ranking: _Ranking | None) -> list[TableView]:
-    """``views_R``: the document's views whose table the retriever ranked; empty without a ranking."""
+def _ranked_views(d: _Doc, ranking: _Ranking | None, leaf: LeafDef) -> list[TableView]:
+    """``views_R`` (§4.2 step 2), in the document's order; empty without a ranking or with an empty one.
+
+    The document's views whose table the retriever ranked, plus, for a statement leaf, every view
+    tagged with the leaf's statement kind (§6.1), so step R's first tier sees what a full scan sees.
+    """
     if ranking is None or not ranking.ranks:
         return []
-    return [v for v in d.views if v.record.chunk_id in ranking.ranks]
+    statement = leaf.source == "statement"
+    return [
+        v for v in d.views
+        if v.record.chunk_id in ranking.ranks or (statement and v.record.statement_kind == leaf.statement_kind)
+    ]
 
 
 def _traced(

@@ -7,7 +7,7 @@ source chunk differs is written to --out (default: NEW's stem + ``.diff.csv``) w
 value_changed, source_changed, ambiguous_to_found, found_to_other, other_to_found or other.
 A key present in only one run is labelled ``other`` and has outcome ``absent`` on the
 missing side. Printed: label counts, NEW's retrieval_step counts and retrieval_rank
-histogram (1, 2-5, 6-10), and p50 / p95 of ``seconds`` for each file.
+histogram (1, 2-5, 6-10, >10, and ``unranked`` for a retrieved row without a rank), and p50 / p95 of ``seconds`` for each file.
 
 Reads and writes only the CSV files given.
 """
@@ -71,10 +71,16 @@ def seconds_summary(rows) -> str:
     return f"p50 {percentile(values, 0.5):.4f}s, p95 {percentile(values, 0.95):.4f}s (n={len(values)})"
 
 
-def rank_bin(text: str) -> str | None:
+RANK_BINS = ("1", "2-5", "6-10", ">10", "unranked")
+
+
+def rank_bin(step: str, text: str | None) -> str | None:
+    """Histogram bucket of one row; ``unranked`` is a ``retrieved`` row without a rank (spec §6.1)."""
+    if step == "retrieved" and not text:
+        return "unranked"
     try:
         rank = int(text)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
     return "1" if rank == 1 else "2-5" if rank <= 5 else "6-10" if rank <= 10 else ">10"
 
@@ -113,8 +119,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"- {lab}: {count}")
     steps = Counter(r.get("retrieval_step", "") for r in new.values() if r.get("retrieval_step", ""))
     print("\nNEW retrieval_step: " + (", ".join(f"{k} {v}" for k, v in steps.most_common()) or "none"))
-    bins = Counter(b for r in new.values() if (b := rank_bin(r.get("retrieval_rank", ""))))
-    print("NEW retrieval_rank: " + ", ".join(f"{b} {bins[b]}" for b in ("1", "2-5", "6-10", ">10")))
+    bins = Counter(b for r in new.values()
+                   if (b := rank_bin(r.get("retrieval_step", ""), r.get("retrieval_rank", ""))))
+    print("NEW retrieval_rank: " + ", ".join(f"{b} {bins[b]}" for b in RANK_BINS))
     print(f"\nseconds BASE: {seconds_summary(base.values())}")
     print(f"seconds NEW:  {seconds_summary(new.values())}")
     return 0

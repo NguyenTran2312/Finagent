@@ -30,6 +30,12 @@ _NOTE_ROWS = [
     ["", "", "2023 VND", "2022 VND"],
     ["", "Lãi tiền gửi ngân hàng", "120.000.000", "90.000.000"],
 ]
+# A note leaf (``source == "notes"``): §6.1 adds no tables for it, so step R reads ranked tables only.
+_ACCRUED_ROWS = [
+    ["", "", "2023 VND", "2022 VND"],
+    ["", "Chi phí lãi vay phải trả", "12.000.000", "9.000.000"],
+]
+ACCRUED_2023 = LeafRequest("accrued_interest_payable", 2023, "closing")
 
 
 class FakeRetriever:
@@ -71,6 +77,19 @@ def _interest(*chunk_ids):
     return FakeRetriever({(2023, "interest_expense"): ranked(*chunk_ids)})
 
 
+def _accrued(*chunk_ids):
+    return FakeRetriever({(2023, "accrued_interest_payable"): ranked(*chunk_ids)})
+
+
+def accrued_table(doc_id="VJC23C"):
+    """Note table 3 holding the note leaf's row."""
+    return record(doc_id, 3, 31, _ACCRUED_ROWS, kind="note")
+
+
+def accrued_store():
+    return store_of((doc("VJC23C", 2023), base_tables() + [accrued_table()]))
+
+
 class RankingValidationTests(unittest.TestCase):
     def test_valid_answer_maps_chunks_to_ranks(self):
         answer = (RankedTable("D:table:2", 2), RankedTable("D:table:1", 1))
@@ -103,18 +122,52 @@ class RetrievalStepTests(unittest.TestCase):
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 2))
 
     def test_row_outside_ranked_tables_falls_back_to_full_scan(self):
-        out = one_with(_interest("VJC23C:table:2"))
+        # The tagged statement has no interest row; the row sits in an unranked note table anchored for
+        # the income statement, a tier §6.1 leaves to the retriever.
+        store = store_of((doc("VJC23C", 2023), [
+            is_table("VJC23C", is_rows(2023, interest=False)),
+            record("VJC23C", 2, 30, _NOTE_ROWS, kind="note"),
+            record("VJC23C", 3, 40, is_rows(2023), kind="note"),
+        ]))
+        out = one_with(_interest("VJC23C:table:2"), store)
         self.assertEqual(out.extracted.fact.value.value, D("-1950254195864"))
+        self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:3")
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
 
-    def test_blank_cell_in_ranked_table_is_final(self):
+    def test_statement_table_is_always_read_in_step_r(self):
+        out = one_with(_interest("VJC23C:table:2"))
+        self.assertEqual(out.extracted.fact.value.value, D("-1950254195864"))
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", None))
+
+    def test_ranked_note_does_not_beat_unranked_statement(self):
         store = store_of((doc("VJC23C", 2023), [
-            is_table("VJC23C", is_rows(2023, current="")),
-            is_table("VJC23C", is_rows(2023), table_id=3, page=40),
+            is_table("VJC23C", is_rows(2023)),
+            record("VJC23C", 3, 40, is_rows(2023, current="(7.000.000.000)"), kind="note"),  # anchored IS
         ]))
-        out = one_with(_interest("VJC23C:table:1"), store)
+        out = one_with(_interest("VJC23C:table:3"), store)
+        self.assertEqual(out.extracted.fact.value.value, D("-1950254195864"))
+        self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:1")
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", None))
+        self.assertEqual(one(store).extracted.fact, out.extracted.fact)  # as with no retriever
+
+    def test_note_leaf_reads_only_ranked_tables(self):
+        out = one_with(_accrued("VJC23C:table:2"), accrued_store(), ACCRUED_2023)
+        self.assertEqual(out.extracted.fact.value.value, D("12000000"))
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
+        out = one_with(_accrued("VJC23C:table:3"), accrued_store(), ACCRUED_2023)
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
+
+    def test_blank_cell_in_ranked_table_is_final(self):
+        # A note leaf: §6.1 would put both tables of a statement leaf in step R.
+        blank = [_ACCRUED_ROWS[0], ["", "Chi phí lãi vay phải trả", "", "9.000.000"],
+                 ["", "Chi phí phải trả khác", "5.000.000", "4.000.000"]]  # keeps the 2023 column a value column
+        store = store_of((doc("VJC23C", 2023), base_tables() + [
+            record("VJC23C", 3, 31, blank, kind="note"),
+            record("VJC23C", 4, 40, _ACCRUED_ROWS, kind="note"),
+        ]))
+        out = one_with(_accrued("VJC23C:table:3"), store, ACCRUED_2023)
         self.assertIsInstance(out, BlankValue)
-        self.assertEqual(out.location.chunk_id, "VJC23C:table:1")
+        self.assertEqual(out.location.chunk_id, "VJC23C:table:3")
 
     def test_empty_answer_reads_full_report(self):
         r = FakeRetriever()
@@ -122,14 +175,14 @@ class RetrievalStepTests(unittest.TestCase):
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
         self.assertEqual(r.calls, [("VJC", "consolidated", 2023, "interest_expense")])
 
-    def test_r1_hidden_conflict_is_accepted_risk(self):
+    def test_r1_conflict_between_statement_tables_stays_ambiguous(self):
         store_r1 = store_of((doc("VJC23C", 2023), base_tables() + [
             is_table("VJC23C", is_rows(2023, current="(5.000.000.000)"), table_id=3, page=40),
         ]))
-        self.assertIsInstance(one(store_r1), Ambiguous)  # no retriever
-        out = one_with(_interest("VJC23C:table:3"), store_r1)
-        self.assertEqual(out.extracted.fact.value.value, D("-5000000000"))
-        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
+        without = one(store_r1)  # no retriever
+        self.assertIsInstance(without, Ambiguous)
+        self.assertEqual(without.reason, "multiple_rows")
+        self.assertEqual(one_with(_interest("VJC23C:table:3"), store_r1), without)
 
     def test_next_year_source_retrieves_with_its_own_year(self):
         store = store_of(
@@ -155,11 +208,12 @@ class RetrievalStepTests(unittest.TestCase):
                                            ("VJC", "consolidated", 2023, "interest_expense")])
 
     def test_variant_without_ranked_table_is_read_in_full(self):
+        # A note leaf: §6.1 would put the variant's statement table in step R for a statement leaf.
         store = store_of(
-            (doc("VJC23C", 2023), base_tables()),
-            (doc("VJC23C1", 2023, variant=1), base_tables("VJC23C1")),
+            (doc("VJC23C", 2023), base_tables() + [accrued_table()]),
+            (doc("VJC23C1", 2023, variant=1), base_tables("VJC23C1") + [accrued_table("VJC23C1")]),
         )
-        out = one_with(_interest("VJC23C:table:1"), store)
+        out = one_with(_accrued("VJC23C:table:3"), store, ACCRUED_2023)
         self.assertIsInstance(out, Found)
         self.assertFalse(any(w.startswith("not_in_variant") for w in out.extracted.warnings))
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
@@ -233,13 +287,14 @@ class RetrievalFailureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             one_with(FakeRetriever({(2023, "interest_expense"): (RankedTable("VJC23C:table:1", 2),)}))
 
+    # Unknown-chunk tests use the note leaf, whose step R §6.1 does not widen.
     def test_unknown_chunk_is_ignored_with_warning(self):
-        out = one_with(_interest("XYZ:table:9", "VJC23C:table:1"))
+        out = one_with(_accrued("XYZ:table:9", "VJC23C:table:3"), accrued_store(), ACCRUED_2023)
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 2))
         self.assertIn("retrieval_unknown_chunks:1", out.extracted.warnings)
 
     def test_only_unknown_chunks_reads_full_report(self):
-        out = one_with(_interest("XYZ:table:9", "XYZ:table:8"))
+        out = one_with(_accrued("XYZ:table:9", "XYZ:table:8"), accrued_store(), ACCRUED_2023)
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "full_scan", None))
         self.assertIn("retrieval_unknown_chunks:2", out.extracted.warnings)
 
@@ -270,22 +325,35 @@ class RetrievalFailureTests(unittest.TestCase):
 
 class RetrievalLocatorTests(unittest.TestCase):
     def test_locator_receives_only_ranked_views(self):
+        # A note leaf (no row in either table): §6.1 adds no statement table to its views.
         for name, retriever, seen in (
-            ("ranked", _interest("VJC23C:table:2"), [["VJC23C:table:2"]]),
+            ("ranked", _accrued("VJC23C:table:2"), [["VJC23C:table:2"]]),
             ("empty answer", FakeRetriever(), [["VJC23C:table:1", "VJC23C:table:2"]]),
             ("retrieval error", FakeRetriever(error=TableRetrievalError("x")),
              [["VJC23C:table:1", "VJC23C:table:2"]]),
         ):
             with self.subTest(name):
                 locator = ViewsLocator(_not_present)
-                out = one_with(retriever, _no_interest_store(), fallback=locator)
+                out = one_with(retriever, _no_interest_store(), ACCRUED_2023, fallback=locator)
                 self.assertIsInstance(out, NotFound)
                 self.assertEqual(locator.views, seen)
                 self.assertEqual(len(retriever.calls), 1)  # the locator's ranking is a cache hit
 
+    def test_locator_receives_statement_tables_too(self):
+        store = store_of((doc("VJC23C", 2023), [is_table("VJC23C", is_rows(2023, interest=False)),
+                                                record("VJC23C", 2, 30, _NOTE_ROWS, kind="note"),
+                                                record("VJC23C", 3, 31, _NOTE_ROWS, kind="note")]))
+        locator = ViewsLocator(read_label("- Trong đó: Chi phí lãi vay"))
+        out = one_with(_interest("VJC23C:table:2"), store, fallback=locator)
+        self.assertEqual(locator.views, [["VJC23C:table:1", "VJC23C:table:2"]])  # unranked note 3 left out
+        self.assertEqual(out.extracted.method, "llm_located")
+        self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:1")
+        self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", None))
+
     def test_locator_found_in_ranked_table_is_retrieved(self):
+        # A note leaf, so the ranked note table is the locator's first (only) view.
         locator = StubLocator(read_label("Lãi tiền gửi ngân hàng", col=2))
-        out = one_with(_interest("VJC23C:table:2"), _no_interest_store(), fallback=locator)
+        out = one_with(_accrued("VJC23C:table:2"), _no_interest_store(), ACCRUED_2023, fallback=locator)
         self.assertEqual(out.extracted.method, "llm_located")
         self.assertEqual(out.extracted.fact.source.chunk_id, "VJC23C:table:2")
         self.assertEqual(out.extracted.retrieval, RetrievalTrace("fake", "retrieved", 1))
