@@ -121,7 +121,9 @@ class ReasoningAgentTest(unittest.TestCase):
         self.assertEqual(run.llm_calls, 3)
         self.assertNotIn("<<<LOI_LAN_TRUOC>>>", scripted.prompts[0])
         self.assertIn("<<<LOI_LAN_TRUOC>>>", scripted.prompts[1])
-        self.assertIn("- year 2022 is not in the question", scripted.prompts[1])
+        # Subquery issues carry their id; plan-level issues (no id) are the bare message.
+        self.assertIn("- q1: year 2022 is not in the question", scripted.prompts[1])
+        self.assertIn("- question year not covered by any subquery: ['2023']", scripted.prompts[1])
         self.assertEqual(kinds(run), ["plan", "metrics", "gather", "solve", "answer"])
         self.assertEqual(run.events[0].data, plan_data(LOOKUP_PLAN))
 

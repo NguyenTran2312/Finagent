@@ -70,10 +70,26 @@ def _history_block(history: list[tuple[int, QATurn]]) -> str:
     return "\n".join(lines)
 
 
+_DELIMITERS = (QUESTION_OPEN, QUESTION_CLOSE, HISTORY_OPEN, HISTORY_CLOSE,
+               FEEDBACK_OPEN, FEEDBACK_CLOSE)
+MAX_FEEDBACK_LINE_CHARS = 200
+
+
+def _feedback_line(problem: str) -> str:
+    """One line of data: no prompt delimiters, whitespace collapsed, at most 200 characters."""
+    previous = None
+    while previous != problem:  # repeat: a removal must not join pieces into a new delimiter
+        previous = problem
+        for delimiter in _DELIMITERS:
+            problem = problem.replace(delimiter, " ")
+        problem = " ".join(problem.split())
+    return problem[:MAX_FEEDBACK_LINE_CHARS]
+
+
 def _feedback_block(feedback: Sequence[str] | None) -> str:
     if not feedback:
         return ""
-    lines = "\n".join(f"- {problem}" for problem in feedback)
+    lines = "\n".join(f"- {_feedback_line(problem)}" for problem in feedback)
     return ("Kế hoạch ở lần trước không hợp lệ. Bộ kiểm tra đã phát hiện các lỗi liệt kê giữa hai "
             "dấu phân cách bên dưới. Hãy trả về một kế hoạch mới đã sửa các lỗi này và vẫn tuân "
             f"thủ mọi quy tắc trên.\n{FEEDBACK_OPEN}\n{lines}\n{FEEDBACK_CLOSE}\n\n")

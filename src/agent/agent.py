@@ -138,8 +138,9 @@ class ReasoningAgent:
     def _plan(self, question: str, qa_history, emit) -> QueryPlan:
         result = self._paraphraser.paraphrase(question, qa_history)
         if result.status == "invalid":  # one repair round with the validator's problems
-            result = self._paraphraser.paraphrase(
-                question, qa_history, feedback=[issue.message for issue in result.issues])
+            feedback = [f"{issue.subquery_id}: {issue.message}" if issue.subquery_id else issue.message
+                        for issue in result.issues]
+            result = self._paraphraser.paraphrase(question, qa_history, feedback=feedback)
         messages = [issue.message for issue in result.issues]
         if result.status == "unavailable":
             raise _refuse("llm_unavailable", messages, status="error")

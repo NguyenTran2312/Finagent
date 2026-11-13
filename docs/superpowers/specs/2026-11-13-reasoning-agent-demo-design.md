@@ -202,7 +202,8 @@ The event `metrics` records, per subquery, the id and how it was found: `catalog
 
 1. **plan:** `paraphraser.paraphrase(question, qa_history)`.
    - `needs_clarification` → status `clarify`.
-   - `invalid` → one repair call `paraphrase(question, qa_history, feedback=[issue messages])`;
+   - `invalid` → one repair call `paraphrase(question, qa_history, feedback=[...])` (issue messages,
+     prefixed "q1: " when the issue has a subquery id);
      its result is handled by these same rules, and a second `invalid` → `refused/plan_invalid`.
      Only the final result emits the plan event.
    - `unavailable` → `error`.
