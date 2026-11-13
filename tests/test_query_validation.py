@@ -674,6 +674,32 @@ class ReviewFixRoundOneTests(ValidationTestCase):
         self.assertInvalid(run(plan(question, sq(ticker="VJC", year=2023, metric="revenue"),
                                     operation="aggregate"), question), "insufficient_operands")
 
+    def test_total_and_ratio_line_items_are_lookups_for_one_company_year(self):
+        cases = [("Tổng tiền trả trước cho người bán ngắn hạn của công ty mẹ PC1 cuối năm 2023 "
+                  "là bao nhiêu triệu đồng?",
+                  dict(ticker="PC1", scope="separate", unit="triệu đồng",
+                       metric_text="tổng tiền trả trước cho người bán ngắn hạn")),
+                 ("Tổng giá trị hàng tồn kho của công ty mẹ HUT vào cuối năm 2024 là bao nhiêu?",
+                  dict(ticker="HUT", scope="separate", year=2024,
+                       metric_text="tổng giá trị hàng tồn kho")),
+                 ("Tổng cộng vốn chủ sở hữu của SSI cuối năm 2016 là bao nhiêu?",
+                  dict(ticker="SSI", year=2016, metric_text="tổng cộng vốn chủ sở hữu")),
+                 ("Tỷ lệ sở hữu của VJC năm 2023 là bao nhiêu?",
+                  dict(ticker="VJC", metric_text="tỷ lệ sở hữu")),
+                 ("Tổng tỷ lệ quyền biểu quyết của VJC năm 2023 là bao nhiêu?",
+                  dict(ticker="VJC", metric_text="tổng tỷ lệ quyền biểu quyết"))]
+        for question, fields in cases:
+            fields.setdefault("year", 2023)
+            with self.subTest(question=question):
+                self.assertValid(run(plan(question, sq(**fields)), question))
+
+    def test_total_across_companies_still_requires_aggregate(self):
+        question = "Tổng doanh thu của VJC và HPG năm 2023 là bao nhiêu?"
+        needs = (sq("q1", ticker="VJC", year=2023, metric="revenue"),
+                 sq("q2", ticker="HPG", year=2023, metric="revenue"))
+        self.assertInvalid(run(plan(question, *needs), question), "operation_mismatch")
+        self.assertValid(run(plan(question, *needs, operation="aggregate"), question))
+
     def test_amount_word_ty_is_billion_vnd_unit(self):
         question = "Doanh thu VJC năm 2023 là bao nhiêu tỷ?"
         fields = dict(ticker="VJC", year=2023, metric="revenue")

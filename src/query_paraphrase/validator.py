@@ -64,10 +64,11 @@ _UNITS = _compile((("billion_vnd", _words(r"t[ỷỉ] đồng|(?:bao nhiêu|\d+)
 _OPERATIONS = _compile((("compare", _words("so sánh")), ("aggregate", _words("tổng|cộng")),
                         ("calculate", _words("chênh lệch|tăng trưởng|t[ỷỉ] lệ|thay đổi"))))
 # Line items and names containing an operation cue that do not ask for that operation.
+# Other "tổng ..." line items are handled by _line_item_total (single ticker and year).
 _NOT_OPERATIONS = re.compile(_words(
-    "tổng (?:cộng )?(?:tài sản|nguồn vốn)|tổng nợ|tổng doanh thu|tổng lợi nhuận kế toán"
+    "tổng (?:cộng )?(?:tài sản|nguồn vốn)|tổng nợ|tổng lợi nhuận kế toán"
     " trước thuế|tổng công ty|tổng giám đốc|cộng đồng|cộng (?:hòa|hoà)"
-    "|t[ỷỉ] lệ (?:nợ xấu|an toàn vốn)"))
+    "|(?:tổng )?t[ỷỉ] lệ (?:nợ xấu|an toàn vốn|sở hữu|quyền biểu quyết|lợi ích)"))
 # Supported follow-up forms: leading "còn ...", "... thì sao", "công ty/doanh nghiệp/
 # chỉ tiêu đó|này", "năm đó". Other implicit references are not treated as inheritance.
 _FOLLOW_UP = re.compile(r"^\W*còn(?!\w)|"
@@ -490,8 +491,12 @@ def _document_type_issues(plan: QueryPlan, question: str):
                      for kind in sorted(cued - requested)]
 
 
-def _operation_issues(plan: QueryPlan, question: str):
+def _operation_issues(plan: QueryPlan, question: str, facts):
     intents = _labels(_NOT_OPERATIONS.sub(" ", _norm(question)), _OPERATIONS)
+    # With at most one ticker and one year, "tổng"/"cộng" is part of a line-item name
+    # ("Tổng giá trị hàng tồn kho"), not a request to add several figures.
+    if len(facts["ticker"]) <= 1 and len(facts["year"]) <= 1:
+        intents.discard("aggregate")
     issues = []
     if intents and plan.operation not in intents:
         issues.append(_issue(INVALID, "operation_mismatch", f"question asks for "
@@ -525,6 +530,6 @@ def validate_plan(raw, question: str, qa_history: list[QATurn] | None = None, *,
     if issues:
         return _result(issues)
     issues = (_subquery_issues(plan, question, facts, history, registry)
-              + _coverage_issues(plan, facts, pairs) + _operation_issues(plan, question)
+              + _coverage_issues(plan, facts, pairs) + _operation_issues(plan, question, facts)
               + _mention_issues(plan, question, registry) + _document_type_issues(plan, question))
     return _result(issues, plan)
