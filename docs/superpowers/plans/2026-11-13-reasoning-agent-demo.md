@@ -341,7 +341,7 @@ Also `def footer(run: AgentRun) -> str` → `f"{run.llm_calls} lần gọi LLM �
 - `llm_calls` = the `CountingLlm.calls` delta for this run; `seconds` is wall time.
 - Events go in this order: plan, metrics, gather (one per gather call, including rounds inside solve), solve (one per attempt), answer. Each one is passed to `on_event` as it happens.
 
-- [ ] **Step 1: Write the failing tests** (end-to-end with `ScriptedLlm`, the real paraphraser and validator on the `sq`/`plan` builders, and `default_store()`):
+- [ ] **Step 1: Write the failing tests** (end-to-end with `ScriptedLlm`, the real paraphraser and validator, and `default_store()`). The `plan(...)` builder in `tests/test_query_validation.py` returns a dict, so script `QueryPlan.model_validate(plan(...))`.
   - `test_lookup_answered`: "Chi phí lãi vay năm 2023 của VJC là bao nhiêu tỷ đồng?" → `answered`; text starts `Trả lời: -1.950,25 tỷ đồng.`; one source; `llm_calls == 2`; event kinds `[plan, metrics, gather, solve, answer]`.
   - `test_history_forwarded_and_clarify` (Review Focus 1): the scripted plan makes the validator return `needs_clarification` → `clarify`, and the paraphraser prompt contains the history question.
   - `test_invalid_plan_refused`, `test_unmapped_metric_refused`, `test_facts_missing_refused`.
