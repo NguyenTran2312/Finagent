@@ -37,7 +37,7 @@ class LeafLog:
 
 @dataclass(frozen=True)
 class AgentConfig:
-    retriever_mode: Literal["none", "bm25", "hybrid"] = "none"
+    retriever_mode: Literal["none", "bm25", "hybrid", "hybrid_rerank"] = "none"
     locator_enabled: bool = True
     max_repairs: int = 3  # code attempts = 1 + max_repairs
     max_gather_rounds: int = 2  # extra gather rounds after the first

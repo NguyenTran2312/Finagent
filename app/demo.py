@@ -64,7 +64,7 @@ def render_turn(events, footer: str | None) -> None:
 def sidebar() -> AgentConfig:
     with st.sidebar:
         st.header("Cấu hình")
-        modes = ["none", "bm25", "hybrid"] if CHROMA_DIR is not None else ["none", "bm25"]
+        modes = ["none", "bm25", "hybrid", "hybrid_rerank"] if CHROMA_DIR is not None else ["none", "bm25"]
         mode = st.selectbox("Bộ truy hồi bảng", modes, index=0)
         if CHROMA_DIR is None:
             st.caption("Hybrid tắt: chưa đặt FINAGENT_CHROMA_DIR.")

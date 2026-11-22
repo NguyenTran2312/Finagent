@@ -388,5 +388,136 @@ class OpenTableRetrieverTests(unittest.TestCase):
         self.assertEqual(retriever_from_args(args, self.db).mode, "bm25")
 
 
+class FakeCrossEncoder:
+    """Scores a pair by the first matching marker in the text; records every batch."""
+
+    def __init__(self, scores=None, error=None, result=None):
+        self.scores, self.error, self.result = dict(scores or {}), error, result
+        self.batches = []
+
+    def score(self, pairs):
+        self.batches.append(list(pairs))
+        if self.error:
+            raise self.error
+        if self.result is not None:
+            return self.result
+        return [next((v for marker, v in self.scores.items() if marker in text), 0.0)
+                for _, text in pairs]
+
+
+class RerankedTableRetrieverTests(unittest.TestCase):
+    def fused_ids(self, k, depth=5):
+        out = HybridTableRetriever(bm25, FakeDenseStore(), k=k, depth=depth).rank(
+            "VJC", "consolidated", 2023, leaf_is)
+        return [t.chunk_id for t in out]
+
+    def test_rerank_scores_fused_pool_with_bm25_text(self):
+        encoder = FakeCrossEncoder()
+        r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank", k=2, depth=5,
+                                 cross_encoder=encoder)
+        r.rank("VJC", "consolidated", 2023, leaf_is)
+        texts = {d.metadata["chunk_id"]: d.page_content for d in DOCS}
+        pool = self.fused_ids(k=5)
+        self.assertEqual(len(encoder.batches), 1)
+        self.assertEqual(encoder.batches[0], [(table_query(leaf_is), texts[i]) for i in pool])
+
+    def test_rerank_orders_by_score_and_truncates_to_k(self):
+        # C:3 ends with "thuyết minh", C:1 with "kinh doanh doanh thu"; C:2 scores 0.
+        encoder = FakeCrossEncoder({"thuyết minh": 3.0, "kinh doanh doanh thu": 1.0})
+        r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank", k=2, depth=5,
+                                 cross_encoder=encoder)
+        out = r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertNotEqual(self.fused_ids(k=2), ["VJC23C:3", "VJC23C:1"])  # rerank changed it
+        self.assertEqual([t.chunk_id for t in out], ["VJC23C:3", "VJC23C:1"])
+        self.assertEqual([t.rank for t in out], [1, 2])
+
+    def test_rerank_ties_keep_fused_order(self):
+        r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank", k=3, depth=5,
+                                 cross_encoder=FakeCrossEncoder())
+        out = r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertEqual([t.chunk_id for t in out], self.fused_ids(k=3))
+
+    def test_rerank_with_no_candidates_skips_encoder(self):
+        encoder = FakeCrossEncoder()
+        r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank", cross_encoder=encoder)
+        self.assertEqual(r.rank("VJC", "consolidated", 2019, leaf_is), ())
+        self.assertEqual(encoder.batches, [])
+
+    def test_encoder_failure_is_wrapped(self):
+        r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank",
+                                 cross_encoder=FakeCrossEncoder(error=RuntimeError("gpu")))
+        with self.assertRaises(TableRetrievalError) as caught:
+            r.rank("VJC", "consolidated", 2023, leaf_is)
+        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        self.assertEqual(str(caught.exception), "hybrid_rerank retrieval failed: RuntimeError")
+
+    def test_bad_scores_fail_explicitly(self):
+        for result in ([float("nan"), 1.0, 2.0], [1.0]):
+            with self.subTest(result=result):
+                r = HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank", k=2, depth=5,
+                                         cross_encoder=FakeCrossEncoder(result=result))
+                with self.assertRaises(TableRetrievalError):
+                    r.rank("VJC", "consolidated", 2023, leaf_is)
+
+    def test_constructor_requires_encoder_only_for_rerank(self):
+        with self.assertRaises(ValueError):
+            HybridTableRetriever(bm25, FakeDenseStore(), mode="hybrid_rerank")
+        with self.assertRaises(ValueError):
+            HybridTableRetriever(bm25, None, mode="hybrid_rerank", cross_encoder=FakeCrossEncoder())
+        with self.assertRaises(ValueError):
+            HybridTableRetriever(bm25, FakeDenseStore(), cross_encoder=FakeCrossEncoder())
+
+
+class OpenRerankedTableRetrieverTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.db = root / "corpus.sqlite3"
+        self.db.write_bytes(b"corpus")
+        self.idx = root / "bm25"
+        self.chroma = root / "chroma"
+        self.chroma.mkdir()
+        (self.chroma / "chroma.sqlite3").write_bytes(b"")
+        save_bm25(bm25, self.idx, "bm25-table", sqlite_source_identity(self.db, chunk_types=("table",)))
+
+    def open(self, **kwargs):
+        encoder = FakeCrossEncoder()
+        with patch.object(table_retriever, "chroma_snapshot", return_value=SNAP), \
+                patch.object(table_retriever, "_chroma_client", return_value=FakeClient(len(bm25.docs))), \
+                patch.object(table_retriever, "_embeddings", return_value="emb"), \
+                patch.object(table_retriever, "_chroma_store", return_value=FakeDenseStore()), \
+                patch.object(table_retriever, "_cross_encoder", return_value=encoder) as load:
+            r = open_table_retriever(self.db, self.idx, chroma_dir=self.chroma, **kwargs)
+        return r, encoder, load
+
+    def test_rerank_mode_loads_cross_encoder_on_device(self):
+        r, encoder, load = self.open(mode="hybrid_rerank")
+        load.assert_called_once_with("cuda")
+        self.assertEqual(r.mode, "hybrid_rerank")
+        self.assertIs(r.cross_encoder, encoder)
+
+    def test_hybrid_mode_loads_no_cross_encoder(self):
+        r, _, load = self.open(mode="hybrid")
+        load.assert_not_called()
+        self.assertIsNone(r.cross_encoder)
+
+    def test_rerank_needs_chroma_before_loading(self):
+        with patch.object(table_retriever, "load_bm25") as bm, \
+                patch.object(table_retriever, "_cross_encoder") as load:
+            for kwargs in ({"chroma_dir": None}, {"device": "cpu"}, {"fp16": False}):
+                with self.subTest(**kwargs), self.assertRaises(ValueError):
+                    open_table_retriever(self.db, self.idx, mode="hybrid_rerank",
+                                         **{"chroma_dir": self.chroma, **kwargs})
+        bm.assert_not_called()
+        load.assert_not_called()
+
+    def test_cli_accepts_rerank_mode(self):
+        parser = argparse.ArgumentParser()
+        add_retriever_arguments(parser)
+        args = parser.parse_args(["--retriever", "hybrid_rerank"])
+        self.assertEqual(args.retriever, "hybrid_rerank")
+
+
 if __name__ == "__main__":
     unittest.main()

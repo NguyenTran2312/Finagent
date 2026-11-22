@@ -1,5 +1,8 @@
 """Table retriever for leaf extraction: BM25 (+ BGE-M3 dense via Chroma) with RRF.
 
+Modes: ``bm25``; ``hybrid`` (BM25 + dense, fused by RRF); ``hybrid_rerank`` (the top ``depth``
+fused tables are re-scored by the cross encoder against their BM25 text; ``k`` are kept).
+
 Implements the ``TableRetriever`` protocol of ``src.extraction.retrieval``. This
 module must stay import-light: torch, chromadb and embedding models are loaded
 lazily by the code that opens the real indexes, never at import time. The source Chroma
@@ -15,6 +18,7 @@ filtered ``similarity_search`` is not used.
 
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,10 +30,12 @@ from src.indexing.bm25_store import load_bm25, sqlite_source_identity
 from src.indexing.chroma import chroma_snapshot
 from src.indexing.table_semantics import StatementKind
 from src.main.refine_questions import filter_document_indices, rank_indices
+from src.retrieval.cross_encoder import _score_cross_encoder
 from src.retrieval.filters import normalize_metadata_filters
 from src.retrieval.hybrid import rrf_fuse
 
-MODES = ("hybrid", "bm25")
+MODES = ("hybrid", "bm25", "hybrid_rerank")
+DENSE_MODES = ("hybrid", "hybrid_rerank")
 COLLECTION = "vifinqa_tables"
 CANDIDATE_CACHE_SIZE = 32
 
@@ -59,16 +65,19 @@ class _Candidates:
 
 
 class HybridTableRetriever:
-    def __init__(self, bm25, dense_store, *, mode: str = "hybrid", k: int = 10, depth: int = 20):
+    def __init__(self, bm25, dense_store, *, mode: str = "hybrid", k: int = 10, depth: int = 20,
+                 cross_encoder=None):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}")
         if not _is_int(k) or k < 1:
             raise ValueError("k must be a positive integer")
         if not _is_int(depth) or depth < k:
             raise ValueError("depth must be an integer at least k")
-        if mode == "hybrid" and dense_store is None:
-            raise ValueError("hybrid mode requires a dense store")
-        self.bm25, self.dense_store = bm25, dense_store
+        if mode in DENSE_MODES and dense_store is None:
+            raise ValueError(f"{mode} mode requires a dense store")
+        if (mode == "hybrid_rerank") != (cross_encoder is not None):
+            raise ValueError("a cross encoder is required in hybrid_rerank mode and only there")
+        self.bm25, self.dense_store, self.cross_encoder = bm25, dense_store, cross_encoder
         self.mode, self.k, self.depth = mode, k, depth
         self._cache: OrderedDict[tuple, _Candidates] = OrderedDict()
         self._query_vectors: dict[str, list[float]] = {}
@@ -91,6 +100,9 @@ class HybridTableRetriever:
             raise TableRetrievalError(f"{self.mode} retrieval failed: {type(exc).__name__}") from exc
         if self.mode == "hybrid":
             documents = rrf_fuse(lexical, dense, k=self.k, c=RRF_CONSTANT)
+        elif self.mode == "hybrid_rerank":
+            pool = rrf_fuse(lexical, dense, k=self.depth, c=RRF_CONSTANT)
+            documents = self._rerank(query, candidates, pool)
         return tuple(
             RankedTable(document.metadata["chunk_id"], index)
             for index, document in enumerate(documents, 1)
@@ -108,6 +120,21 @@ class HybridTableRetriever:
         while len(self._cache) > CANDIDATE_CACHE_SIZE:
             self._cache.popitem(last=False)
         return candidates
+
+    def _rerank(self, query: str, candidates: _Candidates, pool: list) -> list:
+        """Top ``k`` of ``pool`` by cross-encoder score on the BM25 text; ties keep fused order."""
+        if not pool:
+            return []
+        positions = dict(zip(candidates.chunk_ids, candidates.indices))
+        texts = [self.bm25.docs[positions[d.metadata["chunk_id"]]].page_content for d in pool]
+        try:
+            scores = _score_cross_encoder(self.cross_encoder, [(query, text) for text in texts])
+        except Exception as exc:
+            raise TableRetrievalError(f"hybrid_rerank retrieval failed: {type(exc).__name__}") from exc
+        if len(scores) != len(pool) or not all(math.isfinite(score) for score in scores):
+            raise TableRetrievalError("hybrid_rerank retrieval failed: invalid cross-encoder scores")
+        order = sorted(range(len(pool)), key=lambda i: -scores[i])
+        return [pool[i] for i in order[:self.k]]
 
     def _dense(self, query: str, candidates: _Candidates) -> list:
         """Top ``depth`` candidates by exact cosine; ties keep candidate order."""
@@ -145,6 +172,12 @@ def _embeddings(device, fp16):
     return get_embeddings(device=device, fp16=fp16)
 
 
+def _cross_encoder(device):
+    from src.retrieval.reranker import load_reranker
+
+    return load_reranker(device=device)
+
+
 def _chroma_store(client, embeddings):
     from langchain_chroma import Chroma
 
@@ -159,20 +192,25 @@ def open_table_retriever(db_path, bm25_dir, *, bm25_name: str = "bm25-table", ch
 
     The source Chroma index is never opened directly (opening can migrate or rewrite it): hybrid
     mode opens a snapshot copy at ``<chroma_dir parent>/loaded/<sha>``. The first hybrid start
-    copies the index once (~3 GB); later starts reuse the copy.
+    copies the index once (~3 GB); later starts reuse the copy. ``hybrid_rerank`` also loads the
+    configured cross encoder on ``device``, which must then be exactly ``"cuda"``.
     """
-    HybridTableRetriever(None, object(), mode=mode, k=k, depth=depth)  # validates mode / k / depth
-    if mode == "hybrid":
+    rerank = mode == "hybrid_rerank"
+    HybridTableRetriever(None, object(), mode=mode, k=k, depth=depth,  # validates mode / k / depth
+                         cross_encoder=object() if rerank else None)
+    if mode in DENSE_MODES:
         if chroma_dir is None:
-            raise ValueError("hybrid mode requires chroma_dir")
+            raise ValueError(f"{mode} mode requires chroma_dir")
         if fp16 is not True:
             raise ValueError("the table Chroma index holds fp16 BGE-M3 vectors; fp16 must be True")
         if not str(device).startswith("cuda"):
             raise ValueError("fp16 table embeddings need a CUDA device")
+    if rerank and device != "cuda":
+        raise ValueError("hybrid_rerank loads the cross encoder on device 'cuda'")
     bm25 = load_bm25(bm25_dir, bm25_name,
                      expected_identity=sqlite_source_identity(db_path, chunk_types=("table",)))
     dense_store = None
-    if mode == "hybrid":
+    if mode in DENSE_MODES:
         snapshot = chroma_snapshot(chroma_dir, cache_root=Path(chroma_dir).resolve().parent)
         client = _chroma_client(snapshot)
         count = client.get_collection(COLLECTION).count()
@@ -181,11 +219,13 @@ def open_table_retriever(db_path, bm25_dir, *, bm25_name: str = "bm25-table", ch
                 f"Chroma collection {COLLECTION!r} has {count} documents but the BM25 index has "
                 f"{len(bm25.docs)}; rebuild the stale index")
         dense_store = _chroma_store(client, _embeddings(device, fp16))
-    return HybridTableRetriever(bm25, dense_store, mode=mode, k=k, depth=depth)
+    cross_encoder = _cross_encoder(device) if rerank else None
+    return HybridTableRetriever(bm25, dense_store, mode=mode, k=k, depth=depth,
+                                cross_encoder=cross_encoder)
 
 
 def add_retriever_arguments(parser) -> None:
-    parser.add_argument("--retriever", choices=("none", "bm25", "hybrid"), default="none")
+    parser.add_argument("--retriever", choices=("none", "bm25", "hybrid", "hybrid_rerank"), default="none")
     parser.add_argument("--bm25-dir", default=str(Path(PROJECT_ROOT) / "data" / "indexes" / "bm25"))
     parser.add_argument("--bm25-name", default="bm25-table")
     parser.add_argument("--chroma-dir", default=None)
