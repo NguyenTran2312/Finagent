@@ -13,7 +13,8 @@ from config.settings import RERANK_MODEL_NAME
 from src.retrieval.cross_encoder import _score_cross_encoder
 
 
-RERANK_MAX_LENGTH = 1024
+# bge-reranker-base (XLM-RoBERTa) has 514 positions; more tokens crash the model on CUDA.
+RERANK_MAX_LENGTH = 512
 
 
 def load_reranker(*, device: str = "auto"):

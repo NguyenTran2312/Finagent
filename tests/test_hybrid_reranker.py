@@ -93,5 +93,21 @@ class HybridRerankerTests(unittest.TestCase):
         self.assertEqual(inputs, expected)
 
 
+
+class LoadRerankerTests(unittest.TestCase):
+    def test_max_length_fits_the_model_position_limit(self) -> None:
+        # bge-reranker-base (XLM-RoBERTa) has 514 positions: longer inputs crash with a CUDA
+        # device-side assert ("index 514 is out of bounds" on CPU).
+        from unittest import mock
+
+        from src.retrieval import reranker
+
+        with mock.patch("langchain_community.cross_encoders.HuggingFaceCrossEncoder") as model:
+            reranker.load_reranker(device="cpu")
+        kwargs = model.call_args.kwargs["model_kwargs"]
+        self.assertEqual(kwargs["device"], "cpu")
+        self.assertLessEqual(kwargs["max_length"], 512)
+
+
 if __name__ == "__main__":
     unittest.main()
