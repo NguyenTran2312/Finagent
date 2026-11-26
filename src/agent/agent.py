@@ -6,13 +6,13 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 
-from src.agent.answer import answer_text, leaf_detail, refusal_text
+from src.agent.answer import answer_text, leaf_detail, need_detail, refusal_text
 from src.agent.gather import Gatherer
 from src.agent.llm import CountingLlm, LlmUnavailable
 from src.agent.metrics import map_metrics
 from src.agent.present import answer_data, gather_data, metrics_data, plan_data, solve_data
 from src.agent.solver import Attempt, build_context, solve
-from src.agent.types import AgentConfig, AgentRun, DataNeed, StepEvent
+from src.agent.types import AgentConfig, AgentRun, DataNeed, LeafLog, StepEvent
 from src.calculation import Answer, FactSource
 from src.calculation.metric_tree import MetricTree
 from src.extraction.extractor import CellLocator, LeafExtractor
@@ -86,8 +86,9 @@ class ReasoningAgent:
 
         answer: Answer | None = None
         sources: tuple[FactSource, ...] = ()
+        evidence: list[LeafLog] = []
         try:
-            answer, sources = self._answer(question, qa_history, emit)
+            answer, sources = self._answer(question, qa_history, emit, evidence)
             status, reason, text = "answered", None, answer_text(answer, sources, None)
         except _Finished as finished:
             status, reason, text = finished.status, finished.reason, finished.text
@@ -97,10 +98,11 @@ class ReasoningAgent:
             text = refusal_text("llm_unavailable", [f"{type(error).__name__}: {error}"])
         emit("answer", answer_data(status, reason, text, [_source_line(s) for s in sources]))
         return AgentRun(status, text, reason, answer, sources, tuple(events),
-                        self._llm.calls - calls_before, time.perf_counter() - started)
+                        self._llm.calls - calls_before, time.perf_counter() - started, tuple(evidence))
 
     # --- steps ----------------------------------------------------------------------------
-    def _answer(self, question: str, qa_history, emit) -> tuple[Answer, tuple[FactSource, ...]]:
+    def _answer(self, question: str, qa_history, emit,
+                evidence: list[LeafLog]) -> tuple[Answer, tuple[FactSource, ...]]:
         plan = self._plan(question, qa_history, emit)
         mappings, tree = map_metrics(plan, self._tree, self._templates, self._llm)
         emit("metrics", metrics_data(mappings))
@@ -117,10 +119,12 @@ class ReasoningAgent:
         node_ids = {m.subquery_id: m.node_id for m in mappings}
         logs = gatherer.gather([DataNeed(node_ids[sq.id], sq.ticker, sq.year, sq.scope)
                                 for sq in plan.subqueries])
+        evidence.extend(logs)
         emit("gather", gather_data(logs))
 
         def on_attempt(attempt: Attempt) -> None:
             if attempt.gathered:
+                evidence.extend(attempt.gathered)
                 emit("gather", gather_data(attempt.gathered))
             emit("solve", solve_data(attempt), f"Lập trình tính toán — lần {attempt.number}")
 
@@ -129,15 +133,20 @@ class ReasoningAgent:
         if solved.status == "facts_missing":
             raise _refuse("facts_missing", [leaf_detail(log) for log in solved.failed])
         if solved.status != "passed" or solved.result is None:
-            problems = solved.attempts[-1].problems if solved.attempts else ()
-            raise _refuse("gates_failed", problems)
+            last = solved.attempts[-1] if solved.attempts else None
+            if last is not None and last.ungathered:  # needed data no gather round was left for
+                raise _refuse("data_not_gathered",
+                              [need_detail(need, config.default_scope) for need in last.ungathered])
+            raise _refuse("gates_failed", last.problems if last is not None else ())
         keys = solved.result.trace.facts_used()
         sources = tuple(dict.fromkeys(gatherer.facts.get(key).source for key in keys))
         return solved.result.answer, sources
 
     def _plan(self, question: str, qa_history, emit) -> QueryPlan:
         result = self._paraphraser.paraphrase(question, qa_history)
-        if result.status == "invalid":  # one repair round with the validator's problems
+        for _ in range(self._config.max_plan_repairs):  # repair rounds with the validator's problems
+            if result.status != "invalid":
+                break
             feedback = [f"{issue.subquery_id}: {issue.message}" if issue.subquery_id else issue.message
                         for issue in result.issues]
             result = self._paraphraser.paraphrase(question, qa_history, feedback=feedback)

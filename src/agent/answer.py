@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from decimal import Decimal
 
-from src.agent.types import LeafLog
+from src.agent.types import DataNeed, LeafLog
 from src.calculation import Answer, FactSource
 from src.calculation.units import display_unit, round_display, to_display
 
@@ -27,6 +27,7 @@ _REFUSALS = {
     "metric_unmapped": "Không xác định được chỉ tiêu cần tính.",
     "facts_missing": "Không đủ số liệu để trả lời.",
     "gates_failed": "Không tạo được phép tính hợp lệ sau nhiều lần thử.",
+    "data_not_gathered": "Phép tính cần số liệu chưa được thu thập.",
     "clarify": "Câu hỏi cần làm rõ thêm.",
     "llm_unavailable": "Không gọi được mô hình ngôn ngữ, vui lòng thử lại.",
 }
@@ -65,6 +66,11 @@ def answer_text(answer: Answer, sources: Sequence[FactSource], description: str 
 
 def refusal_text(code: str, details: Sequence[str]) -> str:
     return "\n".join([_REFUSALS[code], *(f"- {detail}" for detail in details)])
+
+
+def need_detail(need: DataNeed, default_scope: str) -> str:
+    scope = "hợp nhất" if (need.scope or default_scope) == "consolidated" else "riêng"
+    return f"{need.helper}: {need.node_id} {need.ticker} {need.year} ({scope})"
 
 
 def leaf_detail(log: LeafLog) -> str:

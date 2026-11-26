@@ -35,6 +35,9 @@ class LeafLog:
     tool: Literal["extractor", "locator", "locator_skipped"]
 
 
+RETRIEVER_MODES = ("none", "bm25", "hybrid", "hybrid_rerank")
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     retriever_mode: Literal["none", "bm25", "hybrid", "hybrid_rerank"] = "none"
@@ -43,6 +46,19 @@ class AgentConfig:
     max_gather_rounds: int = 2  # extra gather rounds after the first
     max_locator_calls: int = 6  # per question
     default_scope: Scope = "consolidated"
+    max_plan_repairs: int = 1  # paraphrase calls = at most 1 + max_plan_repairs
+
+    def __post_init__(self) -> None:
+        if self.retriever_mode not in RETRIEVER_MODES:
+            raise ValueError(f"retriever_mode must be one of {RETRIEVER_MODES}")
+        if self.default_scope not in ("consolidated", "separate"):
+            raise ValueError("default_scope must be 'consolidated' or 'separate'")
+        if not isinstance(self.locator_enabled, bool):
+            raise ValueError("locator_enabled must be a bool")
+        for name in ("max_repairs", "max_gather_rounds", "max_locator_calls", "max_plan_repairs"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be an int >= 0")
 
 
 @dataclass(frozen=True)
@@ -62,3 +78,4 @@ class AgentRun:
     events: tuple[StepEvent, ...]
     llm_calls: int
     seconds: float
+    evidence: tuple[LeafLog, ...] = ()  # every leaf outcome gathered during the run, in order

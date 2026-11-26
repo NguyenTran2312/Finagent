@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from config.settings import PROJECT_ROOT
@@ -12,6 +13,7 @@ from src.agent.types import AgentConfig
 from src.calculation.metric_tree import MetricTree
 from src.extraction.extractor import CellLocator, LeafExtractor
 from src.extraction.report_store import SqliteReportStore
+from src.extraction.retrieval import TableRetriever
 from src.extraction.templates import load_ticker_templates
 from src.query_paraphrase.entities import EntityRegistry
 from src.query_paraphrase.paraphraser import QueryParaphraser
@@ -48,7 +50,9 @@ def build_agent(
     db: Path,
     bm25_dir: Path,
     chroma_dir: Path | None,
+    retriever_wrapper: Callable[[TableRetriever], TableRetriever] | None = None,
 ) -> ReasoningAgent:
+    """``retriever_wrapper`` (e.g. a call counter) wraps the shared retriever for this agent only."""
     store = SqliteReportStore(db)
     tree = MetricTree.load()
     templates = load_ticker_templates()
@@ -58,7 +62,8 @@ def build_agent(
     def retriever():
         if config.retriever_mode == "none":
             return None
-        return _shared_retriever(db, bm25_dir, chroma_dir, config.retriever_mode)
+        shared = _shared_retriever(db, bm25_dir, chroma_dir, config.retriever_mode)
+        return shared if retriever_wrapper is None else retriever_wrapper(shared)
 
     def extractor_factory(locator: CellLocator | None) -> LeafExtractor:
         return LeafExtractor(store, tree, templates, fallback=locator, retriever=retriever())

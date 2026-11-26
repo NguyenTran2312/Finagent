@@ -254,7 +254,15 @@ class SolveTest(unittest.TestCase):
         self.assertEqual(result.status, "gates_failed")
         (attempt,) = result.attempts
         self.assertEqual((attempt.gathered, attempt.problems), ((), (UNDECLARED,)))
+        self.assertEqual(attempt.ungathered, (DataNeed("interest_expense", "VJC", 2023),))
         self.assertEqual(self.gatherer.log, ())
+
+    def test_undeclared_data_is_not_ungathered(self):
+        self.pregather()
+        code = 'def solution():\n    return answer(fact("interest_expense", "VJC", 2022), "ty")\n'
+        result = self.run_solve(draft(code=code), config=AgentConfig(max_repairs=0, max_gather_rounds=0))
+        (attempt,) = result.attempts
+        self.assertEqual((attempt.problems, attempt.ungathered), ((UNDECLARED,), ()))
 
 
 if __name__ == "__main__":

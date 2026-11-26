@@ -34,17 +34,24 @@ class CountingLlm:
         return self._inner(prompt, schema)
 
 
+DEFAULT_MODEL = "gpt-6-luna"
+
+
 def openai_llm(
-    model: str = "gpt-6-luna",
+    model: str = DEFAULT_MODEL,
     *,
     timeout: float = 60,
     max_retries: int = 1,
     client=None,
+    callbacks=None,
 ) -> StructuredLlm:
+    """``callbacks``: LangChain callback handlers (e.g. token usage) for the client built here."""
     if client is None:
         from langchain_openai import ChatOpenAI
 
-        client = ChatOpenAI(model=model, timeout=timeout, max_retries=max_retries)
+        client = ChatOpenAI(model=model, timeout=timeout, max_retries=max_retries, callbacks=callbacks)
+    elif callbacks is not None:
+        raise ValueError("callbacks apply only to the client built here; attach them to `client` instead")
 
     def call(prompt: str, schema: type[BaseModel]) -> BaseModel:
         try:

@@ -89,6 +89,8 @@ class Attempt:
     gathered: tuple[LeafLog, ...]
     problems: tuple[str, ...]
     outcome: Literal["passed", "repair", "facts_missing"]
+    # Declared needs never gathered (no gather round left) when the code failed for missing data.
+    ungathered: tuple[DataNeed, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,7 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
         needs = tuple(DataNeed(n.node_id, n.ticker, n.year, n.scope, n.helper) for n in draft.needs)
         gathered: tuple[LeafLog, ...] = ()
         failed: tuple[LeafLog, ...] = ()
+        ungathered: tuple[DataNeed, ...] = ()
         result: ExecutionResult | None = None
         claimed = claimed_answer(draft)
         claim_problems = () if claimed is not None else (
@@ -178,6 +181,8 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
                 if outcome.detail in _DATA_FAILURES:
                     failed = tuple(log for n in needs for log in gatherer.unmet(n))
                     problems = () if failed else (UNDECLARED_DATA, *claim_problems)
+                    if not failed:
+                        ungathered = tuple(dict.fromkeys(n for n in needs if not gatherer.requested(n)))
                 else:
                     problems = (*_failure_problems(outcome), *claim_problems)
             elif claimed is None:  # R8: never gate without a claim; the attempt cannot pass
@@ -187,7 +192,7 @@ def solve(question: str, plan: QueryPlan, mappings: Sequence[MetricMapping], gat
                 problems = tuple(f"{i.code}: {i.message}" for i in report.issues if i.severity == "error")
                 result = outcome if report.passed else None
         status = "facts_missing" if failed else "passed" if result is not None else "repair"
-        attempt = Attempt(number, draft.code, needs, gathered, problems, status)
+        attempt = Attempt(number, draft.code, needs, gathered, problems, status, ungathered)
         attempts.append(attempt)
         on_attempt(attempt)
         if status == "facts_missing":
