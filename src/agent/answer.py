@@ -26,7 +26,7 @@ _REFUSALS = {
     "plan_invalid": "Không phân tích được câu hỏi.",
     "metric_unmapped": "Không xác định được chỉ tiêu cần tính.",
     "facts_missing": "Không đủ số liệu để trả lời.",
-    "gates_failed": "Không tạo được phép tính hợp lệ sau nhiều lần thử.",
+    "gates_failed": "Không tạo được phép tính vượt qua kiểm tra.",
     "data_not_gathered": "Phép tính cần số liệu chưa được thu thập.",
     "clarify": "Câu hỏi cần làm rõ thêm.",
     "llm_unavailable": "Không gọi được mô hình ngôn ngữ, vui lòng thử lại.",

@@ -216,7 +216,7 @@ class ReasoningAgentTest(unittest.TestCase):
         agent, _, _ = make_agent(LOOKUP_PLAN, draft(code=BAD_CODE), draft(code=BAD_CODE), config=config)
         run = agent.run(Q_LOOKUP)
         self.assertEqual((run.status, run.reason), ("refused", "gates_failed"))
-        self.assertTrue(run.text.startswith("Không tạo được phép tính hợp lệ sau nhiều lần thử."), run.text)
+        self.assertTrue(run.text.startswith("Không tạo được phép tính vượt qua kiểm tra."), run.text)
         self.assertIn("import is forbidden", run.text)
         self.assertEqual(kinds(run), ["plan", "metrics", "gather", "solve", "solve", "answer"])
         self.assertSingleAnswerEvent(run)

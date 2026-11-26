@@ -35,23 +35,31 @@ class CountingLlm:
 
 
 DEFAULT_MODEL = "gpt-6-luna"
+DEFAULT_TIMEOUT = 60
+DEFAULT_MAX_RETRIES = 1
 
 
 def openai_llm(
     model: str = DEFAULT_MODEL,
     *,
-    timeout: float = 60,
-    max_retries: int = 1,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
     client=None,
     callbacks=None,
+    temperature: float | None = None,
+    seed: int | None = None,
 ) -> StructuredLlm:
-    """``callbacks``: LangChain callback handlers (e.g. token usage) for the client built here."""
+    """``callbacks``: LangChain callback handlers (e.g. token usage) for the client built here.
+    ``temperature`` / ``seed``: sent only when set; None keeps the provider default."""
     if client is None:
         from langchain_openai import ChatOpenAI
 
-        client = ChatOpenAI(model=model, timeout=timeout, max_retries=max_retries, callbacks=callbacks)
-    elif callbacks is not None:
-        raise ValueError("callbacks apply only to the client built here; attach them to `client` instead")
+        sampling = {name: value for name, value in (("temperature", temperature), ("seed", seed))
+                    if value is not None}
+        client = ChatOpenAI(model=model, timeout=timeout, max_retries=max_retries, callbacks=callbacks,
+                            **sampling)
+    elif callbacks is not None or temperature is not None or seed is not None:
+        raise ValueError("callbacks / temperature / seed apply only to the client built here")
 
     def call(prompt: str, schema: type[BaseModel]) -> BaseModel:
         try:

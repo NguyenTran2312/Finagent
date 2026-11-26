@@ -1,10 +1,12 @@
 """Advanced RAG baseline: config presets, isolated agentic behaviour, telemetry and the runner."""
 
 import dataclasses
+import hashlib
 import importlib.util
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from collections import Counter
@@ -27,7 +29,9 @@ from src.agent.experiment import (
     TokenUsage,
     error_record,
     experiment_config,
+    manifest_id,
     open_runner,
+    run_manifest,
     run_record,
     shared_fields,
     token_record,
@@ -328,8 +332,14 @@ class TelemetryTest(unittest.TestCase):
         with mock.patch("langchain_openai.ChatOpenAI") as chat:
             openai_llm("m", callbacks=[usage])
         self.assertEqual(chat.call_args.kwargs["callbacks"], [usage])
-        with self.assertRaises(ValueError):
-            openai_llm(client=object(), callbacks=[usage])
+        self.assertNotIn("temperature", chat.call_args.kwargs)  # provider default unless set
+        self.assertNotIn("seed", chat.call_args.kwargs)
+        with mock.patch("langchain_openai.ChatOpenAI") as chat:
+            openai_llm("m", temperature=0.0, seed=7)
+        self.assertEqual((chat.call_args.kwargs["temperature"], chat.call_args.kwargs["seed"]), (0.0, 7))
+        for kwargs in ({"callbacks": [usage]}, {"temperature": 0.0}, {"seed": 1}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                openai_llm(client=object(), **kwargs)
 
     def test_build_agent_wraps_the_shared_retriever(self):
         reset_retriever_cache()
@@ -360,8 +370,21 @@ class RunRecordTest(unittest.TestCase):
 
         runner = open_runner("advanced_rag" if config is ADVANCED else "agentic_rag", db=Path("db"),
                              bm25_dir=Path("bm25"), chroma_dir=Path("chroma"), model="test-model",
-                             llm=ScriptedLlm(*replies), build=build)
+                             manifest_id="run-1", llm=ScriptedLlm(*replies), build=build)
         return runner, built
+
+    def test_exception_keeps_the_calls_made_before_it(self):
+        runner, _ = self.runner(LOOKUP_PLAN, RuntimeError("secret"))
+        with self.assertLogs("src.agent.experiment", level="ERROR") as logs:
+            rec = runner.run(3, Q_LOOKUP)
+        self.assertIn("agent run failed for id 3", logs.output[0])
+        self.assertEqual((rec["status"], rec["reason"], rec["manifest_id"]),
+                         ("error", "exception:RuntimeError", "run-1"))
+        telemetry = rec["telemetry"]
+        self.assertEqual((telemetry["llm_calls"], telemetry["llm_calls_by_stage"], telemetry["retrieval_calls"],
+                          telemetry["tokens"]), (2, {"QueryPlan": 1, "SolutionDraft": 1}, 0, None))
+        self.assertGreaterEqual(telemetry["seconds"], 0)
+        self.assertNotIn("secret", json.dumps(rec))
 
     def test_record_of_an_answered_run(self):
         runner, built = self.runner(LOOKUP_PLAN, draft())
@@ -369,8 +392,8 @@ class RunRecordTest(unittest.TestCase):
         self.assertIsInstance(built["wrapper"], RetrievalCounter)
         rec = runner.run(7, Q_LOOKUP)
         json.dumps(rec, ensure_ascii=False)  # serializable
-        self.assertEqual((rec["id"], rec["system"], rec["model"], rec["status"], rec["reason"]),
-                         (7, "advanced_rag", "test-model", "answered", None))
+        self.assertEqual((rec["id"], rec["system"], rec["model"], rec["status"], rec["reason"],
+                          rec["manifest_id"]), (7, "advanced_rag", "test-model", "answered", None, "run-1"))
         self.assertEqual(rec["config"]["max_repairs"], 0)
         self.assertEqual(rec["answer"], {"kind": "quantity", "value": {"value": "-1950254195864",
                                                                        "dimension": "money"},
@@ -407,6 +430,60 @@ class RunRecordTest(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(rec))
 
 
+def _index_dirs(root: Path) -> None:
+    """A database file, a BM25 directory with its pickle and manifest, and a Chroma directory."""
+    (root / "db.sqlite3").write_bytes(b"")
+    (root / "bm25").mkdir()
+    (root / "bm25" / "bm25-table.pkl").write_bytes(b"pickle")
+    (root / "bm25" / "bm25-table.json").write_text('{"document_count": 1}', encoding="utf-8")
+    (root / "chroma").mkdir()
+
+
+class ManifestTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        _index_dirs(self.tmp)
+        self.questions = self.tmp / "q.jsonl"
+        self.questions.write_text('{"id": 1, "question": "x"}\n', encoding="utf-8")
+
+    def manifest(self, system="advanced_rag", **overrides):
+        kwargs = dict(model="m", temperature=None, seed=None, pricing=None, questions=self.questions,
+                      db=self.tmp / "db.sqlite3", bm25_dir=self.tmp / "bm25", chroma_dir=self.tmp / "chroma",
+                      repo_root=PROJECT_ROOT)
+        kwargs.update(overrides)
+        return run_manifest(system, **kwargs)
+
+    def test_manifest_records_code_data_indexes_and_parameters(self):
+        manifest = self.manifest(temperature=0.0, seed=7, pricing=Pricing(D("1"), D("2")))
+        json.dumps(manifest)
+        self.assertEqual(manifest["config"], dataclasses.asdict(ADVANCED))
+        self.assertEqual(manifest["llm"], {"provider": "openai", "model": "m", "timeout": 60, "max_retries": 1,
+                                           "temperature": 0.0, "seed": 7})
+        self.assertEqual(manifest["pricing"], {"input_per_mtok": "1", "output_per_mtok": "2"})
+        self.assertRegex(manifest["code"]["commit"], r"^[0-9a-f]{40}$")
+        self.assertIsInstance(manifest["code"]["dirty"], bool)
+        self.assertEqual(manifest["dataset"]["sha256"], hashlib.sha256(self.questions.read_bytes()).hexdigest())
+        self.assertEqual(manifest["corpus"]["size"], 0)
+        self.assertIsNotNone(manifest["bm25"]["manifest_sha256"])
+        self.assertEqual(manifest["bm25"]["pickle"]["size"], 6)
+        self.assertEqual(manifest["chroma"]["name"], "chroma")
+        self.assertEqual(manifest["retrieval"], {"k": 10, "depth": 20, "fp16": True, "rrf_constant": 60})
+        self.assertEqual(manifest["models"], {"embedding": "BAAI/bge-m3", "reranker": "BAAI/bge-reranker-base"})
+
+    def test_manifest_id_changes_with_any_input(self):
+        base = manifest_id(self.manifest())
+        self.assertEqual(base, manifest_id(self.manifest()))
+        self.assertNotEqual(base, manifest_id(self.manifest("agentic_rag")))
+        self.assertNotEqual(base, manifest_id(self.manifest(temperature=0.0)))
+        self.questions.write_text('{"id": 1, "question": "y"}\n', encoding="utf-8")
+        self.assertNotEqual(base, manifest_id(self.manifest()))
+
+    def test_git_state_is_none_outside_a_repository(self):
+        manifest = self.manifest(repo_root=self.tmp)
+        self.assertEqual(manifest["code"], {"commit": None, "dirty": None})
+
+
 def _load_script():
     spec = importlib.util.spec_from_file_location("run_experiment", PROJECT_ROOT / "scripts" / "run_experiment.py")
     module = importlib.util.module_from_spec(spec)
@@ -414,35 +491,64 @@ def _load_script():
     return module
 
 
+class FakeRunner:
+    """Stands in for ExperimentRunner; records carry the manifest id the script opened it with."""
+
+    config, model = ADVANCED, "m"
+
+    def __init__(self):
+        self.calls = []
+        self.manifest_id = None
+
+    def open(self, *args, manifest_id=None, **kwargs):
+        self.manifest_id = manifest_id
+        return self
+
+    def run(self, question_id, question, qa_history=()):
+        self.calls.append((question_id, question, qa_history))
+        return {"id": question_id, "status": "answered", "reason": None, "manifest_id": self.manifest_id}
+
+
 class RunExperimentScriptTest(unittest.TestCase):
     def setUp(self):
         self.script = _load_script()
         self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
-        (self.tmp / "db.sqlite3").write_bytes(b"")
-        for name in ("bm25", "chroma"):
-            (self.tmp / name).mkdir()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        _index_dirs(self.tmp)
         self.questions = self.tmp / "q.jsonl"
         self.questions.write_text(
             json.dumps({"id": 1, "question": "Câu một?", "answer": "GOLD", "program": "GOLD"}) + "\n"
             + json.dumps({"id": 2, "question": "Câu hai?"}) + "\n", encoding="utf-8")
         self.out = self.tmp / "out.jsonl"
+        self.stderr = ""
 
-    def argv(self, *extra):
-        return ["--system", "advanced_rag", "--questions", str(self.questions), "--out", str(self.out),
+    def argv(self, *extra, system="advanced_rag"):
+        return ["--system", system, "--questions", str(self.questions), "--out", str(self.out),
                 "--db", str(self.tmp / "db.sqlite3"), "--bm25-dir", str(self.tmp / "bm25"),
                 "--chroma-dir", str(self.tmp / "chroma"), *extra]
 
-    def main(self, *extra, runner=None):
-        runner = runner or FakeRunner()
-        with mock.patch.object(self.script, "open_runner", return_value=runner) as opener, \
+    def main(self, *extra, system="advanced_rag"):
+        runner, stderr = FakeRunner(), io.StringIO()
+        # Git is real in ManifestTest; here it only slows the tests down (about 2 s per call).
+        with mock.patch.object(self.script, "open_runner", side_effect=runner.open) as opener, \
+                mock.patch("src.agent.experiment._git_state", return_value={"commit": "c" * 40, "dirty": False}), \
                 mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test"}), \
-                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-            code = self.script.main(self.argv(*extra))
+                redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+            try:
+                code = self.script.main(self.argv(*extra, system=system))
+            finally:
+                self.stderr = stderr.getvalue()
         return code, runner, opener
 
     def records(self):
         return [json.loads(line) for line in self.out.read_text(encoding="utf-8").splitlines()]
+
+    def sidecar(self):
+        return json.loads((self.tmp / "out.jsonl.manifest.json").read_text(encoding="utf-8"))
+
+    def append(self, text):
+        with open(self.out, "a", encoding="utf-8") as handle:
+            handle.write(text)
 
     def test_read_questions_drops_every_other_field(self):
         items = self.script.read_questions(self.questions)
@@ -459,12 +565,19 @@ class RunExperimentScriptTest(unittest.TestCase):
             self.script.read_questions(self.questions)
 
     def test_runs_every_question_and_never_passes_gold_fields(self):
-        code, runner, opener = self.main()
+        code, runner, opener = self.main("--temperature", "0", "--seed", "3")
         self.assertEqual(code, 0)
         self.assertEqual(opener.call_args.args, ("advanced_rag",))
+        self.assertEqual((opener.call_args.kwargs["temperature"], opener.call_args.kwargs["seed"]), (0.0, 3))
         self.assertEqual(runner.calls, [(1, "Câu một?", []), (2, "Câu hai?", [])])
         self.assertEqual([r["id"] for r in self.records()], [1, 2])
         self.assertNotIn("GOLD", self.out.read_text(encoding="utf-8"))
+
+    def test_writes_the_manifest_and_stamps_every_record(self):
+        self.main()
+        manifest = self.sidecar()
+        self.assertEqual((manifest["system"], manifest["llm"]["temperature"]), ("advanced_rag", None))
+        self.assertEqual({r["manifest_id"] for r in self.records()}, {manifest_id(manifest)})
 
     def test_refuses_a_non_empty_output_and_resumes(self):
         self.main("--limit", "1")
@@ -474,30 +587,48 @@ class RunExperimentScriptTest(unittest.TestCase):
         self.assertEqual([c[0] for c in runner.calls], [2])
         self.assertEqual([r["id"] for r in self.records()], [1, 2])
 
-    def test_an_exception_becomes_an_error_record(self):
-        self.main(runner=FakeRunner(fail_on={1}))
-        first, second = self.records()
-        self.assertEqual((first["status"], first["reason"]), ("error", "exception:RuntimeError"))
-        self.assertEqual(second["status"], "answered")
+    def test_resume_refuses_another_system_or_parameters(self):
+        self.main("--limit", "1")
+        for extra, system in (((), "agentic_rag"), (("--temperature", "0"), "advanced_rag")):
+            with self.subTest(extra=extra, system=system):
+                with self.assertRaises(SystemExit):
+                    self.main("--resume", *extra, system=system)
+                self.assertIn("manifest differs", self.stderr)
+        self.assertEqual([r["id"] for r in self.records()], [1])
 
-    def test_rejects_unknown_ids_and_half_pricing(self):
-        for extra in (("--ids", "9"), ("--input-price-per-mtok", "1")):
+    def test_resume_refuses_records_of_another_run(self):
+        self.main("--limit", "1")
+        self.append(json.dumps({"id": 2, "status": "answered", "reason": None, "manifest_id": "other"}) + "\n")
+        with self.assertRaises(SystemExit):
+            self.main("--resume")
+        self.assertIn("belongs to another run", self.stderr)
+
+    def test_resume_refuses_a_missing_manifest(self):
+        self.main("--limit", "1")
+        (self.tmp / "out.jsonl.manifest.json").unlink()
+        with self.assertRaises(SystemExit):
+            self.main("--resume")
+        self.assertIn("is missing", self.stderr)
+
+    def test_resume_removes_only_an_incomplete_final_line(self):
+        self.main("--limit", "1")
+        self.append('{"id": 2, "status": "ans')  # interrupted write
+        _, runner, _ = self.main("--resume")
+        self.assertIn("removed an incomplete final line", self.stderr)
+        self.assertEqual([c[0] for c in runner.calls], [2])
+        self.assertEqual([r["id"] for r in self.records()], [1, 2])
+
+    def test_resume_refuses_a_malformed_complete_line(self):
+        self.main("--limit", "1")
+        self.append("not json\n")
+        with self.assertRaises(SystemExit):
+            self.main("--resume")
+        self.assertIn("not a JSON record", self.stderr)
+
+    def test_rejects_bad_arguments(self):
+        for extra in (("--ids", "9"), ("--input-price-per-mtok", "1"), ("--temperature", "3")):
             with self.subTest(extra=extra), self.assertRaises(SystemExit):
                 self.main(*extra)
-
-
-class FakeRunner:
-    config, model = ADVANCED, "m"
-
-    def __init__(self, fail_on=()):
-        self.calls = []
-        self._fail_on = set(fail_on)
-
-    def run(self, question_id, question, qa_history=()):
-        self.calls.append((question_id, question, qa_history))
-        if question_id in self._fail_on:
-            raise RuntimeError("secret")
-        return {"id": question_id, "status": "answered", "reason": None}
 
 
 if __name__ == "__main__":

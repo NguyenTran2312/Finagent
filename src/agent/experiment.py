@@ -16,6 +16,11 @@ Counters here only observe calls; they never change what a system does.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
+import logging
+import subprocess
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +36,7 @@ from src.extraction.retrieval import RankedTable, TableRetriever
 
 SYSTEMS = ("advanced_rag", "agentic_rag")
 ADAPTIVE_FIELDS = ("max_plan_repairs", "max_repairs", "max_gather_rounds")
+_LOG = logging.getLogger(__name__)
 
 # Every field not in ADAPTIVE_FIELDS is identical for both systems (checked in tests).
 _SHARED = AgentConfig(retriever_mode="hybrid_rerank", locator_enabled=True, max_locator_calls=6,
@@ -213,33 +219,121 @@ def run_record(run: AgentRun, *, question_id, question: str, system: str, config
     }
 
 
+# --- manifest -------------------------------------------------------------------------------
+MANIFEST_VERSION = 1
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_state(repo_root: Path) -> dict[str, object]:
+    """HEAD commit and whether tracked files differ from it; None values when git is unavailable."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(repo_root), *args], capture_output=True, text=True,
+                              check=True, timeout=30).stdout.strip()
+    try:
+        return {"commit": git("rev-parse", "HEAD"),
+                "dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+    except (OSError, subprocess.SubprocessError):
+        return {"commit": None, "dirty": None}
+
+
+def _file_identity(path: Path) -> dict[str, object]:
+    stat = path.stat()
+    return {"path": str(path.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def run_manifest(system: str, *, model: str, temperature: float | None, seed: int | None,
+                 pricing: Pricing | None, questions: Path, db: Path, bm25_dir: Path,
+                 chroma_dir: Path, repo_root: Path, bm25_name: str = "bm25-table") -> dict[str, object]:
+    """Everything a run's records depend on. Large files (corpus, BM25 pickle) are identified by
+    size and mtime, not hashed; the question file and the BM25 manifest are hashed."""
+    import inspect
+
+    from config.settings import DENSE_MODEL_NAME, RERANK_MODEL_NAME, RRF_CONSTANT
+    from src.agent.llm import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
+    from src.retrieval.table_retriever import open_table_retriever  # import-light module
+
+    defaults = inspect.signature(open_table_retriever).parameters
+    bm25_manifest = bm25_dir / f"{bm25_name}.json"
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "system": system,
+        "config": dataclasses.asdict(experiment_config(system)),
+        "llm": {"provider": "openai", "model": model, "timeout": DEFAULT_TIMEOUT,
+                "max_retries": DEFAULT_MAX_RETRIES, "temperature": temperature, "seed": seed},
+        "pricing": None if pricing is None else {"input_per_mtok": str(pricing.input_per_mtok),
+                                                 "output_per_mtok": str(pricing.output_per_mtok)},
+        "code": _git_state(repo_root),
+        "dataset": {"path": str(questions.resolve()), "sha256": _sha256(questions)},
+        "corpus": _file_identity(db),
+        "bm25": {"name": bm25_name,
+                 "manifest_sha256": _sha256(bm25_manifest) if bm25_manifest.is_file() else None,
+                 "pickle": _file_identity(bm25_dir / f"{bm25_name}.pkl")},
+        "chroma": {"path": str(chroma_dir.resolve()), "name": chroma_dir.name},
+        "retrieval": {"k": defaults["k"].default, "depth": defaults["depth"].default,
+                      "fp16": defaults["fp16"].default, "rrf_constant": RRF_CONSTANT},
+        "models": {"embedding": DENSE_MODEL_NAME, "reranker": RERANK_MODEL_NAME},
+    }
+
+
+def manifest_id(manifest: Mapping[str, object]) -> str:
+    canonical = json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 # --- runner ---------------------------------------------------------------------------------
 class ExperimentRunner:
-    """One system, one opened agent; ``run`` returns one record per question (sequential use)."""
+    """One system, one opened agent; ``run`` returns one record per question (sequential use).
+
+    An exception the agent does not turn into a run becomes an error record that keeps the
+    calls made before it (the exception message is never kept: it may carry secrets).
+    """
 
     def __init__(self, system: str, agent, *, config: AgentConfig, model: str, stages: StageCounter,
-                 retrieval: RetrievalCounter, usage: TokenUsage | None, pricing: Pricing | None = None):
-        self.system, self.config, self.model = system, config, model
+                 retrieval: RetrievalCounter, usage: TokenUsage | None, pricing: Pricing | None = None,
+                 manifest_id: str | None = None):
+        self.system, self.config, self.model, self.manifest_id = system, config, model, manifest_id
         self._agent, self._stages, self._retrieval = agent, stages, retrieval
         self._usage, self._pricing = usage, pricing
 
     def run(self, question_id, question: str, qa_history=()) -> dict[str, object]:
         stages_before, retrieval_before = Counter(self._stages.counts), self._retrieval.calls
         usage_before = self._usage.snapshot() if self._usage is not None else None
-        run = self._agent.run(question, qa_history)
-        stages = self._stages.counts - stages_before
+        started = time.perf_counter()
+        run = failure = None
+        try:
+            run = self._agent.run(question, qa_history)
+        except Exception as error:
+            _LOG.exception("agent run failed for id %s", question_id)  # traceback on the log only
+            failure = error
+        seconds = time.perf_counter() - started
+        stages = dict(sorted((self._stages.counts - stages_before).items()))
+        retrieval_calls = self._retrieval.calls - retrieval_before
         tokens = (None if self._usage is None
                   else token_record(usage_before, self._usage.snapshot(), self._pricing))
-        return run_record(run, question_id=question_id, question=question, system=self.system,
-                          config=self.config, model=self.model,
-                          retrieval_calls=self._retrieval.calls - retrieval_before,
-                          llm_calls_by_stage=dict(sorted(stages.items())), tokens=tokens)
+        if run is None:
+            record = error_record(question_id=question_id, question=question, system=self.system,
+                                  config=self.config, model=self.model, error=failure, seconds=seconds)
+            record["telemetry"].update(llm_calls=sum(stages.values()), llm_calls_by_stage=stages,
+                                       retrieval_calls=retrieval_calls, tokens=tokens)
+        else:
+            record = run_record(run, question_id=question_id, question=question, system=self.system,
+                                config=self.config, model=self.model, retrieval_calls=retrieval_calls,
+                                llm_calls_by_stage=stages, tokens=tokens)
+        record["manifest_id"] = self.manifest_id
+        return record
 
 
 def open_runner(system: str, *, db: Path, bm25_dir: Path, chroma_dir: Path | None,
-                model: str = DEFAULT_MODEL, pricing: Pricing | None = None,
-                llm: StructuredLlm | None = None,
-                build: Callable | None = None) -> ExperimentRunner:
+                model: str = DEFAULT_MODEL, temperature: float | None = None, seed: int | None = None,
+                pricing: Pricing | None = None, manifest_id: str | None = None,
+                llm: StructuredLlm | None = None, build: Callable | None = None) -> ExperimentRunner:
     """Open the real components for ``system``. ``llm`` replaces the OpenAI client (no token
     usage is then reported); ``build`` replaces ``build_agent`` (tests)."""
     config = experiment_config(system)
@@ -250,14 +344,14 @@ def open_runner(system: str, *, db: Path, bm25_dir: Path, chroma_dir: Path | Non
         from src.agent.llm import openai_llm
 
         usage = TokenUsage()
-        llm = openai_llm(model, callbacks=[usage])
+        llm = openai_llm(model, callbacks=[usage], temperature=temperature, seed=seed)
     if build is None:
         from src.agent.factory import build_agent as build
     stages, retrieval = StageCounter(llm), RetrievalCounter()
     agent = build(config, llm=CountingLlm(stages), db=db, bm25_dir=bm25_dir, chroma_dir=chroma_dir,
                   retriever_wrapper=retrieval)
     return ExperimentRunner(system, agent, config=config, model=model, stages=stages,
-                            retrieval=retrieval, usage=usage, pricing=pricing)
+                            retrieval=retrieval, usage=usage, pricing=pricing, manifest_id=manifest_id)
 
 
 def error_record(*, question_id, question: str, system: str, config: AgentConfig, model: str,
@@ -268,4 +362,3 @@ def error_record(*, question_id, question: str, system: str, config: AgentConfig
             "question": question, "status": "error", "reason": f"exception:{type(error).__name__}",
             "text": None, "answer": None, "sources": [], "evidence": [], "calculation": None,
             "verification": None, "telemetry": {"seconds": seconds}}
-

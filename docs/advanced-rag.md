@@ -60,8 +60,10 @@ python -X utf8 scripts/run_experiment.py --system advanced_rag --questions data/
 Use `--system agentic_rag` for the comparison run. Useful options:
 
 - `--ids 1,2,3` runs only those questions; `--limit N` runs at most N.
-- `--resume` continues an interrupted run.
+- `--resume` continues an interrupted run (see below).
 - `--model NAME` sets the model (default `gpt-6-luna`).
+- `--temperature T` and `--seed N` are sent to the provider only when given. Use the same values
+  for both systems.
 - `--input-price-per-mtok USD --output-price-per-mtok USD` adds a cost estimate.
 
 `--db`, `--bm25-dir` and `--chroma-dir` default to `FINAGENT_DB`, `FINAGENT_BM25_DIR` and
@@ -69,6 +71,29 @@ Use `--system agentic_rag` for the comparison run. Useful options:
 
 The script reads only `id`, `question` and optional `qa_history` from each input line. Other
 fields, gold answers included, never reach the system.
+
+### Manifest and resume
+
+Each run writes `OUT.manifest.json` next to the output file. It records:
+
+- the system and its full config;
+- the LLM provider, model, timeout, retries, temperature and seed, plus any prices;
+- the git commit and whether tracked files were modified;
+- the SHA-256 of the question file;
+- the corpus database's path, size and mtime;
+- the SHA-256 of the BM25 index's JSON manifest, plus the BM25 pickle's size and mtime;
+- the Chroma index directory;
+- the retrieval parameters (`k`, `depth`, fp16, RRF constant);
+- the embedding and reranker model ids.
+
+The corpus and the BM25 pickle are identified by size and mtime rather than hashed, because
+they are several GB. Every record carries `manifest_id`, the SHA-256 of that manifest.
+
+A non-empty output file is refused unless `--resume` is given. `--resume` continues only when the
+current manifest equals the saved one, so another system, model, sampling setting, commit or
+question file is refused. Every record must also carry the same `manifest_id`, and ids must not
+repeat. A final line left incomplete by an interruption is removed and reported on stderr; any
+other malformed line is an error. Records are flushed and fsynced one at a time.
 
 From Python:
 
@@ -90,6 +115,12 @@ record = runner.run(question_id=1, question="...")
 | `calculation` | last solution program and the number of attempts |
 | `verification` | `passed` and per-attempt outcome and problems |
 | `telemetry` | `seconds`, `llm_calls`, `llm_calls_by_stage` (QueryPlan, MetricChoices, PointerAnswer, SolutionDraft), `retrieval_calls` (retriever `rank` calls), `solver_gather_rounds`, `tokens` |
+| `manifest_id` | the run manifest this record belongs to |
+
+When an exception escapes the agent, the record has status `error` and reason
+`exception:<Class>`; the exception message is never stored. Its telemetry still keeps the LLM
+calls by stage, the retrieval calls and the tokens spent before the failure. The traceback goes
+to stderr.
 
 `tokens` holds provider-reported usage, collected by a LangChain callback. It is `null` when no
 response reported usage. `complete: false` means some responses lacked usage or a call raised;
@@ -113,13 +144,16 @@ Known differences and limitations:
 - Questions whose operands the plan does not name are refused by Advanced RAG. An example is an
   average balance over a leaf metric through `avg_balance()` that no metric formula derives. This
   is the expected effect of removing dynamic gathering.
-- The `gates_failed` refusal text says "after several attempts" in both systems, including
-  Advanced RAG's single attempt. The shared template was not forked.
+- The shared `gates_failed` refusal text no longer mentions several attempts ("Không tạo được
+  phép tính vượt qua kiểm tra."), so it is accurate for both systems. The attempt count is in
+  `verification.attempts`.
 - `data_not_gathered` is a new reason code. It also applies to Agentic RAG when its gather rounds
   are exhausted, a case that was previously reported as `gates_failed`. The repair feedback the
   LLM sees is unchanged.
-- No temperature or seed is set. Both systems use the provider default, so repeated runs may
-  differ.
+- By default no temperature or seed is sent, so the provider default applies (recorded as
+  `null` in the manifest) and repeated runs may differ. Setting `--temperature 0 --seed N` reduces
+  variation, but does not guarantee identical outputs: some models reject or ignore these
+  parameters. This has not been checked against the live provider.
 - Latency includes warm caches: the retriever's per-report candidate cache and the Chroma snapshot
   are shared within a process. Run each system in its own process, in the same order, for
   comparable timings.
